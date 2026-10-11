@@ -193,9 +193,30 @@ struct PanelView: View {
         }
     }
 
+    /// Take a blank sub-task row away when it is being left unused.
+    ///
+    /// Called from every route that moves the caret off one, not just the
+    /// arrow keys in the list. Leaving a row via its own ↑/↓ went through
+    /// `activateRow`, which never checked, so the row stayed behind after you
+    /// had plainly decided not to use it.
+    ///
+    /// Model-only, and that is the point: nothing here touches the store, so it
+    /// cannot leave a mark in the undo history. A blank row you looked at and
+    /// walked away from must be as though it had never been opened, or ⌘Z would
+    /// start undoing things that were never done.
+    private func dismissUnusedBlankRow() {
+        guard let id = model.focusedRow,
+              let parent = draftParent(for: id),
+              model.draft(for: parent).isEmpty else { return }
+        model.hideDraftRow(for: parent)
+    }
+
     /// Put the keyboard on a row: a task takes the list, a blank sub-task row
     /// takes the caret.
     private func activateRow(_ id: UUID) {
+        if draftParent(for: id) == nil {
+            dismissUnusedBlankRow()
+        }
         if let parent = draftParent(for: id) {
             model.requestChildFocus(parent)
         } else {
@@ -382,6 +403,9 @@ struct PanelView: View {
     /// skipped while a draft is being typed, so clicking a task mid-sentence
     /// does not pull the keyboard away mid-word.
     private func selectWithMouse(_ id: UUID, modifiers: NSEvent.ModifierFlags) {
+        if draftParent(for: id) == nil {
+            dismissUnusedBlankRow()
+        }
         if modifiers.contains(.command) {
             model.toggleInSelection(id)
         } else if modifiers.contains(.shift) {
@@ -524,11 +548,19 @@ struct PanelView: View {
 
     // MARK: - Behaviour
 
+    /// Enter at the top prompt.
+    ///
+    /// Saves the task and drops the caret into a sub-task row under it, so
+    /// "go market" ⏎ then "buy bananas" is one continuous motion. The task is
+    /// added already open as a single undo step — see `addAndOpen`.
     private func submit() {
         let text = model.draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        store.add(text)
         model.draft = ""
+
+        guard let id = store.addAndOpen(text) else { return }
+        model.showDraftRow(for: id)
+        model.requestChildFocus(id)
     }
 
     private func enterList() {
@@ -662,6 +694,7 @@ struct PanelView: View {
             // highlight and hand the caret back. A selection left showing while
             // the caret is in the prompt claims the next keypress will act on
             // that task, which is no longer true.
+            dismissUnusedBlankRow()
             model.requestInputFocus()
             return true
 
@@ -676,9 +709,8 @@ struct PanelView: View {
         // Moving away takes a blank row with it, unless something was typed into
         // it. A row you never used should not still be sitting under the list
         // just because you looked at the sub-tasks above it.
-        if !extending, let id = model.focusedRow, let parent = draftParent(for: id),
-           model.draft(for: parent).isEmpty {
-            model.hideDraftRow(for: parent)
+        if !extending {
+            dismissUnusedBlankRow()
         }
         model.moveSelection(by: offset, extending: extending, in: rowIDs)
         if !extending, let id = model.focusedRow {

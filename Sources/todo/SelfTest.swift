@@ -260,6 +260,60 @@ enum SelfTest {
                     s.parentOfDraftRow(ids.child) == nil)
         }
 
+        // Adding a task and opening it must be one undo step. Two would mean
+        // ⌘Z closed the task and left it there, needing a second press to
+        // remove — a task undo has to be immune to that.
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            let id = s.addAndOpen("go market")
+            r.check("keys: addAndOpen hands back the new task", id != nil)
+            r.check("keys: and the task arrives open", s.items.first { $0.id == id }?.expanded == true)
+            s.undo()
+            r.equal("keys: one undo removes it entirely", s.items.count, 0)
+        }
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            s.add("a")
+            s.add("b")
+            s.add("c")
+            s.undo()
+            r.equal("keys: add is one undo step", s.items.map(\.title), ["a", "b"])
+            s.addAndOpen("d")
+            s.undo()
+            r.equal("keys: and so is add-and-open", s.items.map(\.title), ["a", "b"])
+        }
+
+        // A blank row that was looked at and walked away from has to leave no
+        // trace. If showing or hiding one recorded anything, ⌘Z would start
+        // undoing things that were never done — the exact thing the user was
+        // worried about.
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            let m = PanelModel()
+
+            // Settle on a real state first, then count undo entries precisely.
+            s.add("go market")
+            s.undo()                      // history is now empty
+            r.check("keys: history is empty to begin with", !s.canUndo)
+
+            m.showDraftRow(for: UUID())
+            r.check("keys: showing a blank row does not create an undo step", !s.canUndo)
+            m.hideDraftRow(for: UUID())
+            r.check("keys: hiding one does not either", !s.canUndo)
+
+            // And the same when a bar is opened on a task that exists, which is
+            // the path that goes through the store's expanded flag.
+            let parent = s.add("go market")
+            s.undo()
+            r.check("keys: history is empty again", !s.canUndo)
+            _ = s.toggleExpanded(id: parent ?? UUID())
+            s.undo()
+            r.check("keys: a branch toggle does not leave a step behind either", !s.canUndo)
+        }
+
         // The two ends of the list, and the blank row's on-screen life.
         do {
             let m = PanelModel()

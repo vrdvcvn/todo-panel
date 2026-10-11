@@ -40,7 +40,7 @@ reason to throw away something you already typed.
 
 | Key | Does |
 |---|---|
-| type, then **Return** | add a task |
+| type, then **Return** | add a task, and drop into a sub-task row under it |
 | **⌘A** | select all the text you have typed |
 | **↓** | move focus into the list |
 | **↑ ↓** | move the selection |
@@ -62,6 +62,13 @@ task that already has some, it opens the branch and highlights the first
 sub-task instead — re-opening something should show you what is in it, not
 throw you past all of it to an empty prompt. The `>` at the right of a task
 points down while it is open.
+
+**Return** at the top prompt saves the task and puts the caret in a sub-task
+row under it, so a task and its sub-tasks can be written in one go without
+moving the keyboard. The task and its being-open are one undo step, so a single
+**⌘Z** removes both. A sub-task row that you look at and then leave without
+typing in is taken away completely — it leaves nothing behind for **⌘Z** to
+undo.
 
 **⇧Return** is how you add a sub-task without going through Tab. With any task
 highlighted it opens that task's branch and puts a blank `> add a sub task` row

@@ -332,10 +332,31 @@ final class TodoStore: ObservableObject {
 
     // MARK: - Mutations
 
-    func add(_ title: String) {
+    /// Adds a top-level task and hands back its id.
+    @discardableResult
+    func add(_ title: String) -> UUID? {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        perform { items.append(TodoItem(title: trimmed)) }
+        guard !trimmed.isEmpty else { return nil }
+        let item = TodoItem(title: trimmed)
+        perform { items.append(item) }
+        return item.id
+    }
+
+    /// Adds a top-level task already open, so the caret can go straight into a
+    /// sub-task row under it.
+    ///
+    /// Open *and* added, or add and then open, are both deliberate. Doing it in
+    /// two steps would put two entries in the undo history, so one ⌘Z would
+    /// close the task and leave it sitting there, and the second would be
+    /// needed to remove it — which is exactly the kind of thing a task undo has
+    /// to be immune to. One `perform`, one press, gone.
+    @discardableResult
+    func addAndOpen(_ title: String) -> UUID? {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let item = TodoItem(title: trimmed, expanded: true)
+        perform { items.append(item) }
+        return item.id
     }
 
     func toggle(id: UUID) {
