@@ -602,7 +602,7 @@ struct PanelView: View {
             // Down off the bottom row goes back to the add-a-task bar, so the
             // list is a loop you can walk out of at either end. Stopping dead
             // at the last task left the keyboard with nowhere to go but Esc.
-            if !shift, rowIDs.last == model.focusedRow {
+            if !shift, model.isAtBottom(of: rowIDs) {
                 model.requestInputFocus()
                 return true
             }
@@ -613,7 +613,7 @@ struct PanelView: View {
             // Up from the very top goes back to the add-a-task bar. Tab used to
             // be the way out of the list, and it now means "sub-tasks", so
             // without this there would be no keyboard route back to the prompt.
-            if !shift, model.focusedRow == rowIDs.first {
+            if !shift, model.isAtTop(of: rowIDs) {
                 model.requestInputFocus()
                 return true
             }
@@ -648,7 +648,7 @@ struct PanelView: View {
             // there is no prompt to type into, and the old route — Delete on the
             // row to remove it, then Tab to bring it back — meant a closed branch
             // could never be added to again.
-            if let id = model.focusedRow, let parent = parentOfTask(id) {
+            if let id = model.focusedRow, let parent = store.parentForNewSubtask(of: id) {
                 store.setExpanded(true, id: parent)
                 model.showDraftRow(for: parent)
                 model.requestChildFocus(parent)
@@ -686,27 +686,9 @@ struct PanelView: View {
         }
     }
 
-    /// Where a sub-task would go for a highlighted row.
-    ///
-    /// Under the row itself when it is a top-level task, and under its parent
-    /// when the row is already a sub-task — so Shift+Return on a sub-task adds a
-    /// *sibling*. Nesting stops at two levels, so a sub-task cannot take one of
-    /// its own; answering `nil` here instead meant the key fell through to
-    /// "nothing to work on" and jumped to the add-a-task bar instead, which
-    /// looked like Shift+Return simply not working.
-    private func parentOfTask(_ id: UUID) -> UUID? {
-        guard let item = store.items.first(where: { $0.id == id }) else { return nil }
-        return item.parentID ?? item.id
-    }
-
     /// The parent a blank row belongs to, or `nil` if the id is a real task.
     private func draftParent(for id: UUID) -> UUID? {
-        for row in rows {
-            if case .draft(let parent) = row, row.id == id {
-                return parent.item.id
-            }
-        }
-        return nil
+        store.parentOfDraftRow(id)
     }
 
     /// Tab opens and closes a task's sub-tasks. That is all it does.
@@ -727,9 +709,7 @@ struct PanelView: View {
             model.requestInputFocus()
             return
         }
-        guard let item = store.items.first(where: { $0.id == id }) else { return }
-
-        store.setExpanded(!item.expanded, id: id)
+        store.toggleExpanded(id: id)
         // Any blank row goes with it. Toggling means "show me this task's
         // sub-tasks", and a stray prompt in among them is not part of that.
         model.hideDraftRow(for: id)

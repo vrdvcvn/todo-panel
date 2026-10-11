@@ -238,6 +238,44 @@ final class TodoStore: ObservableObject {
         return depth
     }
 
+    /// Tab's whole job: open a task's sub-tasks, or close them again.
+    ///
+    /// It also used to *create* a sub-task when the task had none, which made one
+    /// key do two unrelated things, and the only way to tell which had happened
+    /// was to look at the screen. Creating is Shift+Return's job, so this is a
+    /// single verb.
+    ///
+    /// Returns the new state, so the caller can drop a blank row when the branch
+    /// closes. One history entry, so undo takes a toggle back in one press.
+    @discardableResult
+    func toggleExpanded(id: UUID) -> Bool {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return false }
+        let now = !items[index].expanded
+        perform { items[index].expanded = now }
+        return now
+    }
+
+    /// Where a new sub-task would go for a given task.
+    ///
+    /// Under the task itself when it is top level, and under its parent when it
+    /// is already a sub-task — so adding from a sub-task adds a *sibling*.
+    /// Nesting stops at two levels, so a sub-task cannot take one of its own.
+    ///
+    /// This lived in the view, where no test could reach it, and returned nil
+    /// for a sub-task. Every caller then treated that as "nothing to do" and
+    /// fell back to the top prompt, so the shortcut silently did nothing on
+    /// exactly the rows where it should have been most obvious.
+    func parentForNewSubtask(of id: UUID) -> UUID? {
+        guard let item = items.first(where: { $0.id == id }) else { return nil }
+        return item.parentID ?? item.id
+    }
+
+    /// The parent a blank sub-task row belongs to, or `nil` if the id is a
+    /// real task. The inverse of `draftRowID`, and needs the same test.
+    func parentOfDraftRow(_ id: UUID) -> UUID? {
+        items.first { $0.id.draftRowID == id }?.id
+    }
+
     /// A task plus every sub-task beneath it, at any depth.
     func subTree(of id: UUID) -> Set<UUID> {
         var found: Set<UUID> = [id]

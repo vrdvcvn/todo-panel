@@ -18,6 +18,31 @@ There is no XCTest here: this machine has the Command Line Tools and no full
 Xcode, so there is nothing to link. The checks live in the executable instead,
 run by `verify.sh` before it installs anything.
 
+## Never drive the GUI to test
+
+Synthetic keystrokes and clicks go to the **frontmost application**, which is
+whatever the user is actually using. Sending them during a test means fighting
+whatever they are typing, and it corrupts both: a task created during a test run
+came out as `olgo markt` because the two interleaved. Worse, a test that
+interferes with the person using the machine is not a test, it is a bug.
+
+So: **the self-test is the only thing that verifies behaviour.** `verify.sh` is
+also safe — it quits the app by Apple event and reads the log, and sends no
+keystrokes at all.
+
+If something genuinely cannot be covered that way, it does not belong in an
+automated check. Put it in front of the user as a question instead.
+
+The reason this rule exists: the key rules used to live inside the SwiftUI
+`PanelView`, and a `View` cannot be constructed in a command-line test without a
+window server. So the only way to check them was to drive the real app on a
+real desktop — and a bug got through exactly that way, in
+`parentForNewSubtask`, where Shift+Return on a sub-task did nothing. That rule
+is in the store now and has a test.
+
+When a rule is worth getting right, it belongs in `TodoStore` or `PanelModel`
+where a test can reach it, not in a view.
+
 ## Version control
 
 The repository is the safety net. Work on `main`, commit in small pieces, and

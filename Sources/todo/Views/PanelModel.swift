@@ -129,6 +129,20 @@ final class PanelModel: ObservableObject {
 
     func endEditing() {}
 
+    // MARK: - Sub-task keys
+
+    /// The two places the list stops and hands the caret back to the prompt.
+    ///
+    /// `↑` off the top row and `↓` off the bottom row both land on the
+    /// add-a-task bar, so the list is a loop you can walk out of at either end.
+    func isAtTop(of ids: [UUID]) -> Bool {
+        focusedRow == ids.first && !ids.isEmpty
+    }
+
+    func isAtBottom(of ids: [UUID]) -> Bool {
+        focusedRow == ids.last && !ids.isEmpty
+    }
+
     // MARK: - Sub-task drafts
 
     func draft(for parent: UUID) -> String {

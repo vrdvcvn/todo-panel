@@ -46,6 +46,7 @@ enum SelfTest {
         undoAndRedo(r)
         selection(r)
         nesting(r)
+        keys(r)
 
         print("selftest: \(r.passed) passed, \(r.failures.count) failed")
         for failure in r.failures {
@@ -186,6 +187,111 @@ enum SelfTest {
 
         r.equal("order: ticking all keeps them in the order they were in", after, before)
         r.check("order: the batch really did move", s.visibleItems.allSatisfy(\.done))
+    }
+
+    // MARK: - Keys
+    //
+    // These rules used to live inside the SwiftUI panel, where nothing could
+    // reach them: a View cannot be built in a command-line test without a window
+    // server. The only way to check them was to drive the real app on a real
+    // desktop — which is the user's keyboard and screen, and loses every race
+    // with whatever they are typing. They live here now.
+
+    private static func keys(_ r: Results) {
+        // Where Shift+Return sends a new sub-task. The bug this exists for:
+        // on a sub-task it used to find "no parent to add to", fall through,
+        // and jump to the add-a-task bar, so the key did nothing on exactly
+        // the rows where it should have been most obvious.
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            let ids = tree(s)
+
+            r.equal("keys: shift+Return on a top-level task targets that task",
+                    s.parentForNewSubtask(of: ids.parent), ids.parent)
+            r.equal("keys: shift+Return on a sub-task targets its parent",
+                    s.parentForNewSubtask(of: ids.child), ids.parent)
+            r.equal("keys: shift+Return on a loose task targets that task",
+                    s.parentForNewSubtask(of: ids.loose), ids.loose)
+            r.check("keys: shift+Return on something that is not a task targets nothing",
+                    s.parentForNewSubtask(of: UUID()) == nil)
+
+            // Adding from a sub-task lands as a sibling, still two levels deep.
+            let target = s.parentForNewSubtask(of: ids.child)
+            r.check("keys: adding from a sub-task is allowed", s.addSubtask("milk", under: target ?? UUID()))
+            let branch = s.branches.first { $0.item.id == ids.parent }
+            // Oldest first, so the one written earlier stays above.
+            r.equal("keys: and the parent now has both sub-tasks",
+                    branch?.children.map(\.item.title), ["buy banana", "milk"])
+            r.check("keys: still only two levels", s.branches.allSatisfy { $0.depth == 0 && $0.children.allSatisfy { $0.depth == 1 && $0.children.isEmpty } })
+        }
+
+        // Tab is one verb: open, close, and never create.
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            s.add("go market")
+            let id = s.items.first!.id
+            r.check("keys: a task nobody has opened is closed", !s.items.first!.expanded)
+
+            s.toggleExpanded(id: id)
+            r.check("keys: tab opens it", s.items.first!.expanded)
+            r.equal("keys: and opening creates nothing", s.items.count, 1)
+
+            s.toggleExpanded(id: id)
+            r.check("keys: tab closes it again", !s.items.first!.expanded)
+            r.equal("keys: and closing creates nothing either", s.items.count, 1)
+
+            s.toggleExpanded(id: id)
+            s.undo()
+            r.check("keys: a toggle undoes in a single step", !s.items.first!.expanded)
+        }
+
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            let ids = tree(s)
+
+            r.equal("keys: a blank row resolves to its parent",
+                    s.parentOfDraftRow(ids.parent.draftRowID), ids.parent)
+            r.check("keys: a top-level task is not mistaken for a blank row",
+                    s.parentOfDraftRow(ids.parent) == nil)
+            r.check("keys: a sub-task is not mistaken for a blank row",
+                    s.parentOfDraftRow(ids.child) == nil)
+        }
+
+        // The two ends of the list, and the blank row's on-screen life.
+        do {
+            let m = PanelModel()
+            let a = UUID(), b = UUID(), c = UUID()
+            let rows = [a, b, c]
+
+            m.select(a)
+            r.check("keys: the top row counts as the top", m.isAtTop(of: rows))
+            r.check("keys: and not as the bottom", !m.isAtBottom(of: rows))
+
+            m.select(c)
+            r.check("keys: the bottom row counts as the bottom", m.isAtBottom(of: rows))
+            r.check("keys: and not as the top", !m.isAtTop(of: rows))
+
+            m.select(b)
+            r.check("keys: a middle row is neither", !m.isAtTop(of: rows) && !m.isAtBottom(of: rows))
+
+            // An empty list must claim to be at neither end, or the first
+            // arrow press out of it would jump straight back to the prompt.
+            r.check("keys: an empty list is not at the top", !m.isAtTop(of: []))
+            r.check("keys: an empty list is not at the bottom", !m.isAtBottom(of: []))
+
+            // The blank row is on screen because it was asked for, not because
+            // the branch happens to be open.
+            r.check("keys: a branch is not a blank row", !m.isDraftRowOpen(a))
+            m.showDraftRow(for: a)
+            r.check("keys: asking for it shows it", m.isDraftRowOpen(a))
+            m.showDraftRow(for: a)
+            r.check("keys: asking twice is harmless", m.isDraftRowOpen(a))
+            m.hideDraftRow(for: a)
+            r.check("keys: and it can be taken away", !m.isDraftRowOpen(a))
+        }
     }
 
     // MARK: - Nesting
