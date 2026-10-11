@@ -1,0 +1,17 @@
+# Swift Package Manager build output. `build/` holds the assembled todo.app
+# and `build-app.sh` deletes it after installing, so neither belongs in history.
+.build/
+build/
+.swiftpm/
+
+# Xcode, in case anyone opens this in one rather than using build-app.sh.
+*.xcodeproj
+*.xcworkspace/
+DerivedData/
+
+# A built app, wherever it lands.
+*.app
+
+# macOS and editor noise.
+.DS_Store
+*.swp
