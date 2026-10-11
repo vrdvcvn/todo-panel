@@ -235,6 +235,11 @@ looks like coverage while checking nothing.
 possible — otherwise the only way in is the hotkey. `todo --settings` opens the
 settings popover on launch, for the same reason.
 
+## Working on this
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the checks to run, the git
+convention, and how a release is cut.
+
 ## Layout
 
 ```
