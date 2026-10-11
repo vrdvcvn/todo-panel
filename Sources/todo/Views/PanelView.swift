@@ -686,12 +686,17 @@ struct PanelView: View {
         }
     }
 
-    /// The task a sub-task should be appended under: the row itself if it is a
-    /// top-level task, its parent if the row is already a sub-task.
+    /// Where a sub-task would go for a highlighted row.
+    ///
+    /// Under the row itself when it is a top-level task, and under its parent
+    /// when the row is already a sub-task — so Shift+Return on a sub-task adds a
+    /// *sibling*. Nesting stops at two levels, so a sub-task cannot take one of
+    /// its own; answering `nil` here instead meant the key fell through to
+    /// "nothing to work on" and jumped to the add-a-task bar instead, which
+    /// looked like Shift+Return simply not working.
     private func parentOfTask(_ id: UUID) -> UUID? {
         guard let item = store.items.first(where: { $0.id == id }) else { return nil }
-        guard item.parentID == nil else { return nil } // already a sub-task
-        return item.id
+        return item.parentID ?? item.id
     }
 
     /// The parent a blank row belongs to, or `nil` if the id is a real task.
@@ -704,57 +709,34 @@ struct PanelView: View {
         return nil
     }
 
-    /// Tab is the whole sub-task interface, and it means one of three things
-    /// depending on the row it lands on.
+    /// Tab opens and closes a task's sub-tasks. That is all it does.
+    ///
+    /// It used to be three things at once — toggle, and *create* a sub-task when
+    /// the task had none — which meant one key was doing two unrelated jobs and
+    /// the only way to tell which had happened was to look at the screen.
+    /// Creating is Shift+Return's job now, so Tab is one verb.
     private func tabPressed() {
         guard let id = model.focusedRow else {
             model.requestInputFocus()
             return
         }
 
-        // On a blank sub-task row there is nothing to open or close; go back
-        // to the top prompt rather than eating the key.
-        if draftParent(for: id) != nil {
+        // On a blank sub-task row there is no branch to open or close, so the
+        // key goes back to the top prompt rather than being swallowed.
+        guard draftParent(for: id) == nil else {
             model.requestInputFocus()
             return
         }
-
         guard let item = store.items.first(where: { $0.id == id }) else { return }
-        let depth = store.visibleRows.first { $0.id == id }?.depth ?? 0
-        let hasChildren = store.hasChildren(id)
 
-        // Nothing to open and nowhere deeper to put a sub-task, so Tab has no
-        // meaning here. The depth limit is checked first: a task at the limit is
-        // already a leaf, and "leaf" must not stop an existing branch closing.
-        guard depth < TodoStore.maxDepth || hasChildren else { return }
-
-        if item.expanded {
-            store.setExpanded(false, id: id)
-            model.hideDraftRow(for: id)
-            // Stay on the row. Closing is half of a toggle, and the obvious
-            // thing to do next is press Tab again to open it back up — which
-            // would do nothing at all if the caret had been sent back to the
-            // prompt with it.
-            model.select(id)
-            return
-        }
-
-        store.setExpanded(true, id: id)
-        // Re-opening a task that already has sub-tasks should show you those
-        // sub-tasks, not land the caret in an empty prompt past all of them.
-        if let first = rows.first(where: { row in
-            guard case .task(let branch) = row else { return false }
-            return branch.item.parentID == id
-        }) {
-            model.hideDraftRow(for: id)
-            model.select(first.id)
-            model.enterList()
-        } else {
-            // Nothing under it yet, so opening one is how you ask for a
-            // sub-task in the first place.
-            model.showDraftRow(for: id)
-            model.requestChildFocus(id)
-        }
+        store.setExpanded(!item.expanded, id: id)
+        // Any blank row goes with it. Toggling means "show me this task's
+        // sub-tasks", and a stray prompt in among them is not part of that.
+        model.hideDraftRow(for: id)
+        // Stay on the row, in the list. The caret does not move to a sub-task
+        // row because Tab is not what makes one.
+        model.select(id)
+        model.enterList()
     }
 
     /// Turns the half-typed sub-task into a real one.
