@@ -23,50 +23,13 @@ struct PanelView: View {
     /// or Tab on a task, or Return on a sub-task row — and it goes again the
     /// moment it is left unused. It is a row like any other while it is there:
     /// the arrow keys land on it and it can be highlighted.
-    private enum ListRow: Identifiable {
-        case task(TodoStore.Branch)
-        case draft(parent: TodoStore.Branch)
-
-        var id: UUID {
-            switch self {
-            case .task(let branch): return branch.item.id
-            case .draft(let parent): return parent.item.id.draftRowID
-            }
-        }
-
-        var depth: Int {
-            switch self {
-            case .task(let branch): return branch.depth
-            case .draft(let parent): return parent.depth + 1
-            }
-        }
-    }
-
-    private var rows: [ListRow] {
-        var out: [ListRow] = []
-
-        // A depth-first walk of the whole tree, descending only into branches
-        // that are open. `branches` rather than `visibleRows`, because this
-        // needs the children in order to walk them — `visibleRows` has already
-        // pruned the closed ones.
-        func walk(_ branch: TodoStore.Branch) {
-            out.append(.task(branch))
-            guard branch.item.expanded else { return }
-            branch.children.forEach(walk)
-            // The blank row comes last, after everything already saved, so it
-            // reads as "the next one" rather than as the first. It belongs to
-            // an *opened* task, not to one that happens to have children:
-            // opening a task with nothing under it yet is how you ask for a
-            // sub-task in the first place, so the row has to be there before
-            // there is anything to show. It stops at the depth limit, where
-            // there is no deeper level to add.
-            if branch.depth < TodoStore.maxDepth, model.isDraftRowOpen(branch.item.id) {
-                out.append(.draft(parent: branch))
-            }
-        }
-
-        store.branches.forEach(walk)
-        return out
+    /// The rows on screen.
+    ///
+    /// The walk itself lives in the store, where the self-test can reach it;
+    /// this is only the part that is genuinely view state — which branches have
+    /// their blank row open right now.
+    private var rows: [TodoStore.Row] {
+        store.rows(openDraftRows: model.openDraftRows)
     }
 
     private var rowIDs: [UUID] { rows.map(\.id) }
@@ -323,7 +286,7 @@ struct PanelView: View {
     }
 
     @ViewBuilder
-    private func rowView(_ row: ListRow) -> some View {
+    private func rowView(_ row: TodoStore.Row) -> some View {
         switch row {
         case .task(let branch):
             taskRow(branch, isSelected: model.isSelected(branch.item.id))

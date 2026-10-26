@@ -399,6 +399,24 @@ enum SelfTest {
             s.setExpanded(true, id: ids.parent)
             r.equal("nest: opening brings the branch back",
                     s.visibleRows.map(\.item.title), ["call mum", "go market", "buy banana"])
+
+            // The rows on screen, blank row included. This walk used to live
+            // only in `PanelView`, while these assertions read a second copy in
+            // the store — so a blank row in the wrong place, or missing, was
+            // invisible to every test here.
+            let draftRow = ids.parent.draftRowID
+            r.check("nest: a blank row is not there unless it was asked for",
+                    !s.rows().map(\.id).contains(draftRow))
+
+            let withDraft = s.rows(openDraftRows: [ids.parent])
+            r.equal("nest: asking for one puts it last, after the sub-task",
+                    withDraft.last?.id, draftRow)
+            r.equal("nest: and at the child's depth", withDraft.last?.depth, 1)
+
+            s.setExpanded(false, id: ids.parent)
+            r.check("nest: a closed branch shows no blank row",
+                    !s.rows(openDraftRows: [ids.parent]).map(\.id).contains(draftRow))
+            s.setExpanded(true, id: ids.parent)
         }
 
         // Three levels, so a sub-task can have children but a child of one

@@ -293,8 +293,9 @@ swift Tools/make-icon.swift && iconutil -c icns Resources/todo.iconset -o Resour
 `todo --selftest` checks the rules that are easy to break quietly and cannot be
 confirmed by looking at the screen: undo and redo, mass tick and mass delete,
 every way of selecting more than one task, and the sub-task tree — cascade
-delete, the depth limit, a sub-task whose parent has gone missing, and a list
-file written before sub-tasks existed. It also covers which field the caret is
+delete, the depth limit, where the blank sub-task row lands in the tree, a
+sub-task whose parent has gone missing, and a list file written before
+sub-tasks existed. It also covers which field the caret is
 in, where the caret lands when a title opens (counted in characters, not UTF-16
 units), correcting a title and abandoning the correction, where the highlight
 lands after a tick or a delete, an action that changes nothing not costing a

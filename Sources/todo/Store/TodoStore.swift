@@ -184,20 +184,83 @@ final class TodoStore: ObservableObject {
         return topLevel.sorted(by: Self.newestFirst).map { build($0, depth: 0) }
     }
 
-    /// The branches as a flat list, for the arrow keys and the rows on screen.
+    /// One row of the list as it is drawn: a task, or the blank row that asks
+    /// for the next sub-task under an open branch.
+    ///
+    /// A row rather than an item because the blank row has no task behind it —
+    /// it is a prompt — and the keyboard has to be able to land on it. It lives
+    /// here rather than in the view so that "what is on screen" is a rule the
+    /// self-test can reach. The view used to build its own copy of this walk,
+    /// and the copy the tests asserted was not the one the user saw.
+    enum Row: Identifiable {
+        case task(Branch)
+        case draft(parent: Branch)
+
+        var id: UUID {
+            switch self {
+            case .task(let branch): return branch.item.id
+            case .draft(let parent): return parent.item.id.draftRowID
+            }
+        }
+
+        var depth: Int {
+            switch self {
+            case .task(let branch): return branch.depth
+            case .draft(let parent): return parent.depth + 1
+            }
+        }
+
+        /// The task this row belongs to — itself, or the task a blank row would
+        /// add a sub-task to.
+        var item: TodoItem {
+            switch self {
+            case .task(let branch): return branch.item
+            case .draft(let parent): return parent.item
+            }
+        }
+    }
+
+    /// The rows on screen, in order.
     ///
     /// A closed task contributes itself and nothing else, so navigating never
     /// lands the caret on a row that is not there.
-    var visibleRows: [Branch] {
-        var rows: [Branch] = []
+    ///
+    /// `openDraftRows` is the set of branches currently showing their blank
+    /// sub-task row. It is passed in rather than read from the model because it
+    /// is UI state; the walk itself is not, and having two copies of it meant
+    /// the assertions and the screen could disagree.
+    func rows(openDraftRows: Set<UUID> = []) -> [Row] {
+        var out: [Row] = []
+
         func walk(_ branch: Branch) {
-            rows.append(branch)
-            if branch.item.expanded {
-                branch.children.forEach(walk)
+            out.append(.task(branch))
+            guard branch.item.expanded else { return }
+            branch.children.forEach(walk)
+            // The blank row comes last, after everything already saved, so it
+            // reads as "the next one" rather than as the first. It belongs to
+            // an *opened* task, not to one that happens to have children:
+            // opening a task with nothing under it yet is how you ask for a
+            // sub-task in the first place, so the row has to be there before
+            // there is anything to show. It stops at the depth limit, where
+            // there is no deeper level to add.
+            if branch.depth < Self.maxDepth, openDraftRows.contains(branch.item.id) {
+                out.append(.draft(parent: branch))
             }
         }
+
         branches.forEach(walk)
-        return rows
+        return out
+    }
+
+    /// The task branches only, with no blank rows — the shape the arrow keys
+    /// and the older assertions want.
+    ///
+    /// The same walk as `rows(openDraftRows:)`, so the two cannot drift.
+    var visibleRows: [Branch] {
+        rows().compactMap { row in
+            if case .task(let branch) = row { return branch }
+            return nil
+        }
     }
 
     /// Whether a task has any sub-tasks at all, open or closed.
