@@ -25,10 +25,22 @@ enum LoginItem {
         case .requiresApproval:
             // macOS 13+ can park a login item in a "needs your approval" state.
             // Re-registering is the documented way to ask again.
-            if enabled { try SMAppService.mainApp.register() }
+            //
+            // Turning it *off* used to fall through and do nothing, so the
+            // switch snapped straight back and the item stayed pending in
+            // System Settings — the one state where a user most wants it gone.
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
 
         @unknown default:
-            if enabled { try SMAppService.mainApp.register() }
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
         }
     }
 

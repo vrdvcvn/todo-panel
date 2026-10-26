@@ -33,10 +33,23 @@ struct KeyCatcher: NSViewRepresentable {
         view.onKey = onKey
 
         guard context.coordinator.lastFocusToken != focusToken else { return }
-        context.coordinator.lastFocusToken = focusToken
 
-        if focusToken > 0 {
-            view.window?.makeFirstResponder(view)
+        // Deferred, and the token is only spent once the keyboard is actually
+        // here. This is the one focus request that arrives from inside a
+        // gesture callback — clicking a task — and taking first responder
+        // mid-SwiftUI-pass is swallowed often enough to matter. Spending the
+        // token on a request that did not happen made it worse: the highlight
+        // said the list had the keyboard while the caret was still in the
+        // prompt, so Space typed a space and Delete edited text.
+        guard focusToken > 0 else {
+            context.coordinator.lastFocusToken = focusToken
+            return
+        }
+
+        DispatchQueue.main.async { [weak view, weak coordinator = context.coordinator] in
+            guard let view, let window = view.window else { return }
+            coordinator?.lastFocusToken = focusToken
+            window.makeFirstResponder(view)
         }
     }
 

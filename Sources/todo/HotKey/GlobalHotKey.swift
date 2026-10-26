@@ -145,4 +145,6 @@ enum KeyCode {
     static let forwardDelete: UInt32 = 117
     static let arrowUp: UInt32 = 126
     static let arrowDown: UInt32 = 125
+    static let arrowLeft: UInt32 = 123
+    static let arrowRight: UInt32 = 124
 }

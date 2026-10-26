@@ -22,8 +22,14 @@ final class KeyWindow: NSWindow {
     /// to ordinary key handling, and the row that has the keyboard gets the
     /// keystroke like any other.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if Int(event.keyCode) == KeyCode.tab, event.modifierFlags.isEmpty {
-            return false
+        // Only the real command modifiers are tested. `modifierFlags.isEmpty`
+        // was the check, and Caps Lock or the numeric pad flip flags that have
+        // nothing to do with the combination. With Caps Lock on, Tab quietly
+        // went back to key-view traversal: the exact failure this override
+        // exists to prevent, reappearing over an ordinary letter key.
+        if Int(event.keyCode) == KeyCode.tab {
+            let commandModifiers = event.modifierFlags.intersection([.command, .control, .option])
+            if commandModifiers.isEmpty { return false }
         }
         return super.performKeyEquivalent(with: event)
     }

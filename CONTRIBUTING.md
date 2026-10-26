@@ -9,10 +9,19 @@ real app, and it takes under a minute:
 ./verify.sh
 ```
 
-`todo --selftest` is the part that matters most. Undo, multi-select and the
-sub-task tree are easy to break quietly and hard to confirm by looking at the
-screen, so they are covered by 71 assertions run directly against the store and
-the panel model.
+`todo --selftest` is the part that matters most. Undo, multi-select, the
+sub-task tree, which field the caret is in and what a hand-edited file is
+allowed to contain are all easy to break quietly and hard to confirm by looking
+at the screen, so they are covered by assertions run directly against the store
+and the panel model. The count is printed at the end of the run.
+
+`verify.sh --screenshot` writes `build/panel.png` of the whole screen with the
+panel up, and it is worth using. It is the only way to *see* the layout
+problems — a hint line that wraps into two, a column that does not line up, a
+tree that does not read as a tree, a marker left on rows it has no business
+being on. Those are exactly the bugs the self-test cannot reach and a person
+notices in about a second. Reading the code will not show you them; looking at
+the panel will.
 
 There is no XCTest here: this machine has the Command Line Tools and no full
 Xcode, so there is nothing to link. The checks live in the executable instead,

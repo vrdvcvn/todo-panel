@@ -11,6 +11,24 @@ struct KeyRecorder: View {
     let role: HotKeyCenter.Conflict.Role
     let onConflict: (String) -> Void
 
+    /// Whether the drawer this box lives in is still on screen.
+    ///
+    /// The capture view asks for the keyboard a runloop turn after it is armed,
+    /// so it is not first responder *yet* — and arming the box and then hiding
+    /// the panel in that window left `isRecording` set with nothing left to
+    /// bring it down. `HotKeyCenter` then went on ignoring the panel's own
+    /// hotkey, so ⌥Space did nothing at all until the app was restarted.
+    var isActive: Bool = true
+
+    /// Hand the keyboard back to the panel when recording ends, however it
+    /// ended.
+    ///
+    /// The capture view is a zero-sized view sitting behind the box, and it
+    /// keeps first responder until something takes it away. Nothing did: after
+    /// recording a combination the panel stayed deaf, because every keystroke
+    /// was still going to a view that was no longer listening for them.
+    var onFinish: () -> Void = {}
+
     @State private var isRecording = false
 
     private var current: Shortcut {
@@ -35,6 +53,20 @@ struct KeyRecorder: View {
         .contentShape(RoundedRectangle(cornerRadius: 5))
         .onTapGesture { beginRecording() }
         .background(captureLayer)
+        .onChange(of: isActive) { _, active in
+            guard !active else {
+                // Coming back with a stale armed state — the panel was hidden
+                // while the box was waiting for a key. Cleared *without* the
+                // hand-off: the drawer has only just appeared, and the keyboard
+                // belongs wherever whoever opened it put it.
+                if isRecording {
+                    isRecording = false
+                    HotKeyCenter.shared.endRecording()
+                }
+                return
+            }
+            finish()
+        }
     }
 
     private var captureLayer: some View {
@@ -55,14 +87,25 @@ struct KeyRecorder: View {
         HotKeyCenter.shared.beginRecording()
     }
 
+    /// Idempotent, and that is the point.
+    ///
+    /// Recording can end three ways — a combination was pressed, Escape, or
+    /// the keyboard went somewhere else — and they can land on top of each
+    /// other: handing the keyboard back makes the capture view resign, which is
+    /// itself a way of ending. Without this guard the last step of that chain
+    /// asked for focus again, which asked for focus again, forever.
     private func finish() {
+        guard isRecording else { return }
         isRecording = false
         HotKeyCenter.shared.endRecording()
+        onFinish()
     }
 
     private func adopt(_ shortcut: Shortcut) {
         do {
             try HotKeyCenter.shared.apply(shortcut, for: role)
+        } catch HotKeyCenter.RegistrationError.appUnavailable {
+            onConflict("cannot register a shortcut until the panel is open")
         } catch {
             onConflict("that combination is already taken")
         }
@@ -87,7 +130,13 @@ private struct CaptureView: NSViewRepresentable {
         guard isRecording else { return }
         // Focus on the next runloop turn: this is called during a SwiftUI
         // layout pass, and taking first responder mid-pass is unreliable.
-        DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
+        // Skipped when the keyboard is already here — `makeFirstResponder`
+        // runs a resign/become cycle even for the view that already holds it,
+        // and that would be read as the recorder being disarmed.
+        DispatchQueue.main.async {
+            guard let window = view.window, window.firstResponder !== view else { return }
+            window.makeFirstResponder(view)
+        }
     }
 
     final class CaptureNSView: NSView {
@@ -120,5 +169,22 @@ private struct CaptureView: NSViewRepresentable {
         // recorder shows a static prompt — but the override keeps them from
         // bubbling into the panel.
         override func flagsChanged(with event: NSEvent) {}
+
+        /// Losing the keyboard disarms the recorder.
+        ///
+        /// `isRecording` used to come back down only through a keypress, so
+        /// arming the box and then clicking somewhere else left it armed for
+        /// good: it kept saying "press keys…", `HotKeyCenter` stayed in
+        /// recording mode and went on ignoring the panel's own hotkey, and the
+        /// keys went to a view that had stopped listening.
+        ///
+        /// Deferred a turn, because this runs inside AppKit handing the
+        /// responder over and re-entering SwiftUI state from there is how the
+        /// re-entrancy crash happens.
+        override func resignFirstResponder() -> Bool {
+            let cancel = onCancel
+            DispatchQueue.main.async { cancel?() }
+            return true
+        }
     }
 }

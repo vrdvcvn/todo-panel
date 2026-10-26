@@ -87,8 +87,23 @@ final class TodoStore: ObservableObject {
         return lhs.createdAt > rhs.createdAt
     }
 
+    /// Top-level tasks still to do.
+    ///
+    /// Sub-tasks are counted out. They are steps *inside* a task rather than
+    /// tasks of their own, so including them made the footer disagree with the
+    /// screen: a list showing eight open rows under one task with three
+    /// sub-tasks read "11 open", and there was no way to tell from the number
+    /// whether it counted something you could see.
     var openCount: Int {
-        items.reduce(0) { $0 + ($1.done ? 0 : 1) }
+        items.reduce(0) { $0 + ($1.done || $1.parentID != nil ? 0 : 1) }
+    }
+
+    /// Top-level tasks already finished.
+    ///
+    /// Counted the same way as `openCount` so the two halves of the footer mean
+    /// the same thing: how many things, not how many lines.
+    var doneCount: Int {
+        items.reduce(0) { $0 + ($1.done && $1.parentID == nil ? 1 : 0) }
     }
 
     // MARK: - Nesting
@@ -210,7 +225,16 @@ final class TodoStore: ObservableObject {
         return true
     }
 
-    /// Opens or closes a task's sub-tasks.
+    /// Opens or closes a task's sub-tasks, recording the change.
+    ///
+    /// Deliberately not the path Return and Tab take to open a branch. Those
+    /// open one so the caret can drop into a row underneath, and that row is
+    /// very likely to be left empty — and "opened a branch, typed nothing, walked
+    /// away" is not something the user did, so it must not cost a ⌘Z press.
+    /// `openWithoutHistory(id:)` is the other half of that pair: use it when the
+    /// open is in service of typing, and this one when the open *is* the change
+    /// — the disclosure triangle, which someone pressed on purpose and expects
+    /// ⌘Z to take back.
     ///
     /// A task that was never opened becomes "closed" the first time Tab
     /// closes it, which is the same thing as never having been opened again —
@@ -220,6 +244,75 @@ final class TodoStore: ObservableObject {
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         guard items[index].expanded != expanded else { return }
         perform { items[index].expanded = expanded }
+    }
+
+    /// Puts "opened" back to "never opened" on a task with nothing under it.
+    ///
+    /// The single-task spelling, kept because it is what every caller wants and
+    /// what the tests read better than. The rule itself, and the reason it is
+    /// not an undo step, live on `collapseChildlessParents(_:)`.
+    func collapseIfChildless(id: UUID) {
+        collapseChildlessParents([id])
+    }
+
+    /// Closes every task in `parents` left with nothing under it.
+    ///
+    /// Deliberately *not* an undo step, for the reason it exists at all: this is
+    /// tidying up after a change, not a change of its own. "Looked at a blank row
+    /// and walked away" is not something the user did, and "deleted the last
+    /// sub-task" is a delete — a history entry here would mean the first ⌘Z after
+    /// a delete restored nothing visible and the second was needed to undo it.
+    /// `openWithoutHistory(id:)` is careful not to record one either, so the pair
+    /// costs nothing at all.
+    ///
+    /// Returns the ones it closed, so a caller can tell a no-op from a change.
+    @discardableResult
+    func collapseChildlessParents(_ parents: [UUID]) -> [UUID] {
+        var closed: [UUID] = []
+        for parent in parents where !closed.contains(parent) {
+            guard let index = items.firstIndex(where: { $0.id == parent }) else { continue }
+            guard items[index].expanded, !hasChildren(parent) else { continue }
+            items[index].expanded = false
+            closed.append(parent)
+        }
+        if !closed.isEmpty { persist() }
+        return closed
+    }
+
+    /// Opens a branch so the caret can drop into a row under it, *without*
+    /// recording a history step.
+    ///
+    /// The counterpart to `collapseIfChildless`, and for the same reason:
+    /// opening a branch to type into it is not a change to the list yet. Leave
+    /// the row empty and nothing happened — so nothing may be left in the undo
+    /// history either. Otherwise "add a task, Return, Escape" leaves an entry
+    /// in the stack identical to the state before it, and the ⌘Z after that does
+    /// nothing at all: it takes two presses to remove the task, which is the one
+    /// thing adding a task must never cost.
+    ///
+    /// The disclosure triangle deliberately does *not* come through here: that
+    /// is a change to the list made on purpose, and meant to be undoable.
+    func openWithoutHistory(id: UUID) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        guard !items[index].expanded else { return }
+        items[index].expanded = true
+        persist()
+    }
+
+    /// The task a given item hangs under, or `nil` for a top-level one.
+    func parentID(of id: UUID) -> UUID? {
+        items.first { $0.id == id }?.parentID
+    }
+
+    /// Changes a task's title. One undo step, like everything else.
+    @discardableResult
+    func rename(id: UUID, to title: String) -> Bool {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return false }
+        guard items[index].title != trimmed else { return false }
+        perform { items[index].title = trimmed }
+        return true
     }
 
     /// How far below the top a task sits.
@@ -238,6 +331,16 @@ final class TodoStore: ObservableObject {
         return depth
     }
 
+    /// Whether Tab has anything to open or close on this task.
+    ///
+    /// False for a sub-task, which is at the depth limit and so has no branch
+    /// of its own. Toggling one anyway flips a flag that nothing draws, which
+    /// spends a ⌘Z press on a keystroke that changed nothing on screen.
+    func canToggleExpanded(id: UUID) -> Bool {
+        guard let item = items.first(where: { $0.id == id }) else { return false }
+        return Self.depth(of: item, in: items) < Self.maxDepth
+    }
+
     /// Tab's whole job: open a task's sub-tasks, or close them again.
     ///
     /// It also used to *create* a sub-task when the task had none, which made one
@@ -247,9 +350,11 @@ final class TodoStore: ObservableObject {
     ///
     /// Returns the new state, so the caller can drop a blank row when the branch
     /// closes. One history entry, so undo takes a toggle back in one press.
+    /// Refuses on a task at the depth limit — see `canToggleExpanded`.
     @discardableResult
     func toggleExpanded(id: UUID) -> Bool {
         guard let index = items.firstIndex(where: { $0.id == id }) else { return false }
+        guard Self.depth(of: items[index], in: items) < Self.maxDepth else { return false }
         let now = !items[index].expanded
         perform { items[index].expanded = now }
         return now
@@ -333,28 +438,16 @@ final class TodoStore: ObservableObject {
     // MARK: - Mutations
 
     /// Adds a top-level task and hands back its id.
+    ///
+    /// Closed, with nothing under it, because that is what "a task" means: a
+    /// task that has been opened but has nothing in it is a branch with nothing
+    /// in it, and it draws an arrow claiming there is something underneath.
+    /// Adding is one `perform`, so one ⌘Z removes it.
     @discardableResult
     func add(_ title: String) -> UUID? {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let item = TodoItem(title: trimmed)
-        perform { items.append(item) }
-        return item.id
-    }
-
-    /// Adds a top-level task already open, so the caret can go straight into a
-    /// sub-task row under it.
-    ///
-    /// Open *and* added, or add and then open, are both deliberate. Doing it in
-    /// two steps would put two entries in the undo history, so one ⌘Z would
-    /// close the task and leave it sitting there, and the second would be
-    /// needed to remove it — which is exactly the kind of thing a task undo has
-    /// to be immune to. One `perform`, one press, gone.
-    @discardableResult
-    func addAndOpen(_ title: String) -> UUID? {
-        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        let item = TodoItem(title: trimmed, expanded: true)
         perform { items.append(item) }
         return item.id
     }
@@ -365,6 +458,10 @@ final class TodoStore: ObservableObject {
 
     /// Ticks every given task. `true` marks them all done, `false` un-marks
     /// them — decided by the first one, so a mixed selection moves together.
+    ///
+    /// Refuses on ids that are not on the list at all, so nothing is recorded
+    /// for a tick that cannot happen. There is no other no-op: `target` is the
+    /// opposite of the first task's state, so at least one always moves.
     func toggle(ids: [UUID]) {
         let wanted = ids.compactMap { id in items.first(where: { $0.id == id })?.done }
         guard !wanted.isEmpty else { return }
@@ -389,13 +486,24 @@ final class TodoStore: ObservableObject {
     /// behind would strand them at the top of the list with no way to tell what
     /// they belonged to — and "buy banana" surviving the deletion of "go market"
     /// is not a state anyone would ask for.
+    ///
+    /// Branches the delete empties are closed afterwards, so the row above is
+    /// never left holding an arrow over an empty space. The parents are resolved
+    /// *before* the removal: afterwards the items are gone, and with them the
+    /// only record of what they hung under.
     func delete(ids: [UUID]) {
         guard !ids.isEmpty else { return }
         let doomed = ids.reduce(into: Set(ids)) { all, id in
             all.formUnion(subTree(of: id))
         }
-        guard !doomed.isEmpty else { return }
+        // `doomed` is never empty once `ids` is, so the old guard here was
+        // vacuous. What actually matters is whether anything on the list matches:
+        // deleting ids that are not there has to be a no-op rather than an undo
+        // entry that appears to do nothing when it is taken back.
+        guard doomed.contains(where: { id in items.contains { $0.id == id } }) else { return }
+        let parents = doomed.compactMap { parentID(of: $0) }
         perform { items.removeAll { doomed.contains($0.id) } }
+        collapseChildlessParents(parents)
     }
 
     /// Ticks the top of each selected branch and nothing below it.
@@ -410,7 +518,16 @@ final class TodoStore: ObservableObject {
         let selected = Set(ids)
         guard !selected.isEmpty else { return }
 
-        let byID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+        // Built by hand rather than with `Dictionary(uniqueKeysWithValues:)`,
+        // which *traps* on a duplicate key. `todos.json` is advertised as
+        // hand-editable, so two entries sharing an id is a state the file can
+        // easily be put into — and a crash on the way in loses whatever the
+        // user was in the middle of. First one wins, same as everywhere else.
+        var byID: [UUID: TodoItem] = [:]
+        for item in items where byID[item.id] == nil {
+            byID[item.id] = item
+        }
+
         func hasSelectedAncestor(_ id: UUID) -> Bool {
             var current = byID[id]
             var budget = items.count
@@ -425,6 +542,16 @@ final class TodoStore: ObservableObject {
         toggle(ids: selected.filter { !hasSelectedAncestor($0) })
     }
 
+    /// Removes every finished task, as one undoable step.
+    ///
+    /// Ticking is one keystroke and clearing was impossible, so a list that was
+    /// actually being used filled up with struck-through rows that pushed the
+    /// work still to do off the bottom of the panel. The only route was picking
+    /// each finished task out one at a time and deleting it.
+    ///
+    /// A finished task takes its sub-tasks with it, as any delete does; an open
+    /// task keeps them, so clearing the day's work never throws away a sub-task
+    /// still outstanding under something you have not finished.
     func clearCompleted() {
         let finished = items.filter(\.done).map(\.id)
         delete(ids: finished)
@@ -435,6 +562,14 @@ final class TodoStore: ObservableObject {
     func load() {
         ensureDirectory()
 
+        // A reload starts a fresh session of history. Carrying the stacks over
+        // would make ⌘Z walk backwards through whatever happened before the
+        // panel was opened, which is not what undo is for here.
+        undoStack.removeAll()
+        redoStack.removeAll()
+        canUndo = false
+        canRedo = false
+
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             items = []
             return
@@ -442,11 +577,73 @@ final class TodoStore: ObservableObject {
 
         do {
             let data = try Data(contentsOf: fileURL)
-            items = try JSONDecoder.todo.decode([TodoItem].self, from: data)
+            let decoded = try JSONDecoder.todo.decode([TodoItem].self, from: data)
+            let (kept, droppedDuplicates) = Self.deduplicated(decoded)
+            items = Self.withoutStaleExpansion(kept)
+            // Only written back when reading actually changed the *list*.
+            //
+            // The tempting version is "re-encode and write if the bytes differ",
+            // and it quietly throws away anything `TodoItem` does not model —
+            // every key somebody added by hand, and their formatting — on the
+            // next launch. The file is advertised as hand-editable, so it is
+            // their file. Duplicates are the one case where rewriting is the
+            // only way the change survives.
+            if droppedDuplicates > 0 { persist() }
         } catch {
             quarantineCorruptFile(reason: String(describing: error))
             items = []
         }
+    }
+
+    /// Throws away repeated ids, keeping the first occurrence.
+    ///
+    /// Ids are the list's only identity: they key the `ForEach` in the panel,
+    /// the selection set, and the walk `subTree` does. Two rows sharing one id
+    /// hand SwiftUI a duplicate id and make every selection operation address
+    /// two rows at once, so the file is worth sanitising on the way in rather
+    /// than defending against everywhere else afterwards.
+    ///
+    /// Returns how many were dropped alongside the survivors, so the caller can
+    /// tell a file that needed fixing from one that did not.
+    /// Drops "opened" from any task that has nothing under it.
+    ///
+    /// Adding a task opens it — that is what lets the caret drop straight into a
+    /// row beneath it — and for a long time nothing took it back. So every task
+    /// ever added carried a permanent green `v` and an `"expanded": true`,
+    /// including the great majority that never had a sub-task. A list of thirty
+    /// reminders looked like a tree, and the marker claimed there was something
+    /// in here when there was not.
+    ///
+    /// Applied on the way *in*, in memory only. Tidying up as rows are dismissed
+    /// fixes it going forward but never reaches the tasks already on disk, and
+    /// this is exactly the state a list written by an older build is in.
+    ///
+    /// Deliberately not written back on its own: rewriting a file just because
+    /// it decoded into something slightly different would throw away anything
+    /// the user has added by hand, and this file is advertised as editable. The
+    /// next change to the list writes the tidied version out in the ordinary way.
+    private static func withoutStaleExpansion(_ loaded: [TodoItem]) -> [TodoItem] {
+        let parents = Set(loaded.compactMap(\.parentID))
+        return loaded.map { item in
+            guard item.expanded, !parents.contains(item.id) else { return item }
+            var tidied = item
+            tidied.expanded = false
+            return tidied
+        }
+    }
+
+    private static func deduplicated(_ loaded: [TodoItem]) -> ([TodoItem], Int) {
+        var seen: Set<UUID> = []
+        var out: [TodoItem] = []
+        out.reserveCapacity(loaded.count)
+        for item in loaded where seen.insert(item.id).inserted {
+            out.append(item)
+        }
+        let dropped = loaded.count - out.count
+        if dropped > 0 {
+            Diag.log("todos.json had \(dropped) duplicate id(s); dropped")
+        }
+        return (out, dropped)
     }
 
     private func persist() {
@@ -459,8 +656,14 @@ final class TodoStore: ObservableObject {
         }
     }
 
+    /// Creates the directory *this store's* file lives in.
+    ///
+    /// Derived from `fileURL` rather than hard-wired to the application support
+    /// folder: the self-test points a store at a temporary file, and creating
+    /// the real data directory on its behalf would be a side effect of running
+    /// a test.
     private func ensureDirectory() {
-        let directory = TodoStore.directoryURL()
+        let directory = fileURL.deletingLastPathComponent()
         guard !FileManager.default.fileExists(atPath: directory.path) else { return }
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

@@ -35,7 +35,11 @@ final class HotKeyCenter {
 
     enum RegistrationError: Error {
         case conflict(Conflict)
-        case noModifiers
+        /// Re-registering needs a live delegate to ask. Reported separately
+        /// because the recorder shows every error as "already taken", and
+        /// telling somebody their combination is taken when the real problem is
+        /// that nothing could be registered with is worse than saying nothing.
+        case appUnavailable
     }
 
     // MARK: - Registration
@@ -46,26 +50,41 @@ final class HotKeyCenter {
     ) throws {
         unregisterAll()
 
-        guard let newOpen = GlobalHotKey(
+        // Both are attempted even when the first one fails.
+        //
+        // They used to be registered in sequence with an early `throw`, so a
+        // combination another app already owned — almost always ⌥Space, which
+        // other hotkey managers like — also cost us ⌃⌥⌘Q. The result is the
+        // worst outcome available to an app with no Dock icon and no menu bar
+        // item: running, impossible to summon, and impossible to stop except
+        // from Activity Monitor.
+        openKey = GlobalHotKey(
             keyCode: ShortcutStore.open.keyCode,
             modifiers: ShortcutStore.open.modifiers,
             action: onOpen
-        ) else {
-            throw RegistrationError.conflict(.init(shortcut: ShortcutStore.open, role: .open))
-        }
-        openKey = newOpen
-
-        guard let newQuit = GlobalHotKey(
+        )
+        quitKey = GlobalHotKey(
             keyCode: ShortcutStore.quit.keyCode,
             modifiers: ShortcutStore.quit.modifiers,
             action: onQuit
-        ) else {
-            unregisterAll()
+        )
+
+        // Says what actually registered, not what was asked for. The log is the
+        // only place a refused shortcut is visible at all, and a line claiming
+        // both are live when one is not is worse than none.
+        Diag.log(
+            "hotkeys: open=\(openKey == nil ? "REFUSED \(ShortcutStore.open.display)" : ShortcutStore.open.display)"
+            + " quit=\(quitKey == nil ? "REFUSED \(ShortcutStore.quit.display)" : ShortcutStore.quit.display)"
+        )
+
+        // Reported worst-first: not being able to summon the panel is the more
+        // serious of the two, so it is the one that decides the thrown error.
+        if openKey == nil {
+            throw RegistrationError.conflict(.init(shortcut: ShortcutStore.open, role: .open))
+        }
+        if quitKey == nil {
             throw RegistrationError.conflict(.init(shortcut: ShortcutStore.quit, role: .quit))
         }
-        quitKey = newQuit
-
-        Diag.log("hotkeys: open=\(ShortcutStore.open.display) quit=\(ShortcutStore.quit.display)")
     }
 
     /// Adopts a newly recorded shortcut. If the combination turns out to be
@@ -75,13 +94,21 @@ final class HotKeyCenter {
         let previous = role == .open ? ShortcutStore.open : ShortcutStore.quit
         guard shortcut != previous else { return }
 
+        // Re-registering needs the delegate. Optional-chaining through a nil
+        // one would swallow the whole operation: the new combination would be
+        // written to disk and reported as a success while never being
+        // registered, so the box would show a shortcut that does nothing.
+        guard let app = AppDelegate.shared else {
+            throw RegistrationError.appUnavailable
+        }
+
         if role == .open { ShortcutStore.open = shortcut } else { ShortcutStore.quit = shortcut }
 
         do {
-            try AppDelegate.shared?.registerHotKeys()
+            try app.registerHotKeys()
         } catch {
             if role == .open { ShortcutStore.open = previous } else { ShortcutStore.quit = previous }
-            try? AppDelegate.shared?.registerHotKeys()
+            try? app.registerHotKeys()
             throw error
         }
     }

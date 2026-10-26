@@ -25,6 +25,13 @@ final class PanelModel: ObservableObject {
     enum InputTarget: Equatable {
         case root
         case child(UUID)
+        /// An existing task's title, being corrected.
+        ///
+        /// A third kind of field because being unable to fix a typo is not a
+        /// small gap. A mistyped task could only be dealt with by deleting it
+        /// and typing it again — which loses its place in the list *and* every
+        /// sub-task under it, over one wrong letter.
+        case edit(UUID)
     }
 
     @Published var draft: String = ""
@@ -70,12 +77,31 @@ final class PanelModel: ObservableObject {
     /// Bumped to ask the top field to become first responder.
     @Published private(set) var inputFocusToken: Int = 0
 
-    /// Same, for the list key catcher, the inline editor, and the blank
+    /// Same, for the list key catcher, the inline title editor and the blank
     /// sub-task row. Comparing tokens is how a representable knows a *new*
     /// request arrived rather than re-stealing focus on every SwiftUI update.
     @Published private(set) var listFocusToken: Int = 0
     @Published private(set) var editFocusToken: Int = 0
     @Published private(set) var childFocusToken: Int = 0
+
+    /// The row the keyboard should be scrolled to, or `nil`.
+    ///
+    /// Set only by the arrow keys, and read once by the list.
+    ///
+    /// This used to be `onChange(of: selection)`, which meant *every* way of
+    /// changing the selection also scrolled — including clicking a row with the
+    /// pointer, which yanked it to the middle of the panel. The pointer is
+    /// already looking at the row it clicked; moving the viewport to prove it is
+    /// there is the definition of a scroll nobody asked for.
+    @Published private(set) var scrollTarget: UUID?
+
+    func noteKeyboardMove(to id: UUID) {
+        scrollTarget = id
+    }
+
+    func clearScrollTarget() {
+        scrollTarget = nil
+    }
 
     // MARK: - Focus
 
@@ -122,12 +148,112 @@ final class PanelModel: ObservableObject {
         listFocusToken += 1
     }
 
-    func beginEditing(id: UUID) {
-        editFocusToken += 1
-        select(id)
+    /// Records that the caret landed in a field because the *user* put it there,
+    /// rather than because we asked for it.
+    ///
+    /// `inputTarget` is otherwise only moved by the focus requests above, and
+    /// clicking straight into a field is not one of them. So after clicking
+    /// into the top prompt, `inputTarget` still named whatever sub-task row the
+    /// keyboard had been in — and `focusedText` then reported that row as empty,
+    /// which sent ⌘Z off to undo a task instead of undoing the characters in
+    /// front of you.
+    ///
+    /// Deliberately does not touch the selection or bump a focus token: the
+    /// user has already done both.
+    func adoptInputTarget(_ target: InputTarget) {
+        guard inputTarget != target else { return }
+        inputTarget = target
+        mode = .input
     }
 
-    func endEditing() {}
+    // MARK: - Editing a title
+
+    /// Where the caret should land when a title editor opens.
+    ///
+    /// Every route into an edit is "I want to fix something", and where the
+    /// caret lands decides what one keystroke does next: at the end, the keys
+    /// you press are more text; at the start, they are a correction of the
+    /// word you got wrong. ← and → are how you choose between them.
+    enum EditCaret: Equatable {
+        case start
+        case end
+    }
+
+    /// The task whose title is being edited, and the text in that field.
+    ///
+    /// Kept apart from the sub-task drafts because they answer different
+    /// questions: a sub-task draft is something not yet written down, and
+    /// leaving it alone has to throw it away. A title edit is a correction to
+    /// something that already exists, and leaving it has to leave it as it was.
+    @Published private(set) var editing: UUID?
+    @Published private(set) var editDraft: String = ""
+
+    /// Where the caret was asked to go. Held rather than passed straight to the
+    /// field because the field is created and updated later, and by then the
+    /// call that asked for it has long gone.
+    private var editCaret: EditCaret = .end
+
+    private var editOriginal = ""
+
+    /// Opens `id`'s title for editing. The current text is passed in rather than
+    /// looked up, because the store is the one that owns the list and the model
+    /// has no business holding a second copy of it.
+    ///
+    /// Defaults to `.end`: the commonest edit is "I left a character off the
+    /// end", and a caret at the start would send the next letter to the front.
+    func beginEditing(id: UUID, title: String, caret: EditCaret = .end) {
+        editing = id
+        editOriginal = title
+        editDraft = title
+        editCaret = caret
+        inputTarget = .edit(id)
+        mode = .input
+        editFocusToken += 1
+    }
+
+    /// The character offset the editor's caret should sit at.
+    ///
+    /// An offset rather than an `EditCaret`, because the field can only be told
+    /// where to put the caret in absolute terms, and `.end` moves as you type.
+    /// The field clamps it to what it actually holds — the draft can change
+    /// between the request and the field being updated — and clamping there
+    /// keeps that detail in one place.
+    var editCaretOffset: Int {
+        editCaret == .start ? 0 : editDraft.count
+    }
+
+    func setEditDraft(_ text: String) {
+        guard editDraft != text else { return }
+        editDraft = text
+    }
+
+    /// Ends the edit without saving. Returns the title to put back.
+    func cancelEditing() {
+        editDraft = editOriginal
+        endEditing()
+    }
+
+    /// Ends the edit and hands back the text, for the caller to commit.
+    func endEditing() {
+        editing = nil
+        editDraft = ""
+        editOriginal = ""
+        if case .edit = inputTarget { inputTarget = .root }
+    }
+
+    /// The row to put the keyboard on after an edit ends.
+    ///
+    /// Back in the list rather than up at the add-a-task bar: fixing a typo is
+    /// something you do *to* a task, and the next thing you want is usually to
+    /// carry on with the list. The row stays selected so Return and Space still
+    /// apply to the task just corrected.
+    func finishEditing() {
+        let id = editing
+        endEditing()
+        guard let id else { return }
+        select(id)
+        enterList()
+    }
 
     // MARK: - Sub-task keys
 
@@ -164,8 +290,8 @@ final class PanelModel: ObservableObject {
     /// branch is open" left a stray `> add another sub task` sitting under every
     /// branch for as long as it was open, which is clutter you have to look past
     /// to read the sub-tasks you actually wrote. It is now there because you
-    /// asked for it — Tab on a task with nothing under it, or Shift+Enter — and
-    /// gone again the moment you move away from it.
+    /// asked for it — Return or Tab on the task, or Return on a sub-task row —
+    /// and gone again the moment you move away from it.
     @Published private(set) var openDraftRows: Set<UUID> = []
 
     func showDraftRow(for parent: UUID) {
@@ -185,6 +311,74 @@ final class PanelModel: ObservableObject {
     func clearDraft(for parent: UUID) {
         guard childDrafts[parent] != nil else { return }
         childDrafts[parent] = nil
+    }
+
+    /// Takes away every blank sub-task row left unused, and says which parents
+    /// no longer have a reason to be open.
+    ///
+    /// For when the panel is being put away. Closing the panel is a way of
+    /// leaving a row, and an empty one left behind that way came straight back
+    /// next time — a `> add a sub task` prompt hanging under a task nobody
+    /// asked for one under, waiting for the rest of the session.
+    ///
+    /// The caller gets the parents back because closing the panel is also the
+    /// moment to drop their "opened" flag; see `TodoStore.collapseIfChildless`.
+    @discardableResult
+    func discardUnusedDraftRows() -> [UUID] {
+        let unused = openDraftRows.filter { draftIsBlank($0) }
+        openDraftRows.subtract(unused)
+        return Array(unused)
+    }
+
+    /// Whether a blank sub-task row is unused.
+    ///
+    /// Trimmed, because "unused" has to mean the same thing everywhere. The
+    /// save path tests the trimmed text and the dismissal paths used to test the
+    /// raw one, so a row holding nothing but spaces was blank to one and full
+    /// to the other — Return declined to add a task, Delete declined to remove
+    /// the row, and nothing could shift it either way.
+    func draftIsBlank(_ parent: UUID) -> Bool {
+        draft(for: parent).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Whatever text the caret is actually sitting in.
+    ///
+    /// There are two fields, and the obvious answer — `draft` — is only one of
+    /// them. Anything deciding "is there typing worth protecting here?" has to
+    /// ask about the field that is focused, not the one at the top of the
+    /// panel: while the caret was in a blank sub-task row `draft` was empty, so
+    /// ⌘Z decided nothing was being typed and undid a task instead.
+    var focusedText: String {
+        switch inputTarget {
+        case .root: return draft
+        case .child(let parent): return draft(for: parent)
+        case .edit: return editDraft
+        }
+    }
+
+    /// Whether the caret is in a title that already exists.
+    ///
+    /// A different question from "is there typing worth protecting", and the
+    /// two disagree in the one case that matters. The top prompt holds something
+    /// that does not exist yet, so an empty prompt means ⌘Z belongs to the list
+    /// — there is nothing to recover. A title editor holds a task that was
+    /// already there: emptying it and pressing ⌘Z is unmistakably asking for the
+    /// words back, and answering with "here is your task, deleted" is the worst
+    /// thing the key could do.
+    var isEditingTitle: Bool {
+        if case .edit = inputTarget { return true }
+        return false
+    }
+
+    /// The blank sub-task row the caret is in, if it is in one.
+    ///
+    /// The counterpart to `focusedRow` for the same reason. `requestChildFocus`
+    /// clears the selection, so the row the caret is sitting in is the one row
+    /// the selection cannot name — and anything that has to work out "is the
+    /// keyboard in a blank row?" has to ask here instead.
+    var focusedDraftParent: UUID? {
+        if case .child(let parent) = inputTarget { return parent }
+        return nil
     }
 
     // MARK: - Selecting
@@ -279,6 +473,10 @@ final class PanelModel: ObservableObject {
             self.anchor = ids[next]
         }
         focus = ids[next]
+
+        // The only route into `scrollTarget`: the keyboard walking off the edge
+        // of the screen is the one case where the list has to follow.
+        scrollTarget = ids[next]
     }
 
     /// Drops selected rows that are no longer on screen.
@@ -291,5 +489,29 @@ final class PanelModel: ObservableObject {
         selection = selection.intersection(live)
         if let anchor, !live.contains(anchor) { self.anchor = nil }
         if let focus, !live.contains(focus) { self.focus = nil }
+    }
+
+    /// Forgets half-typed sub-task text belonging to tasks that are gone.
+    ///
+    /// `childDrafts` and `openDraftRows` are keyed by parent, so an undo or a
+    /// delete that removes a task would otherwise leave its entries behind for
+    /// good — a row that can never be drawn, and text that comes back if a new
+    /// task ever happens to reuse the id. Neither is cleared anywhere else:
+    /// only the field that happened to be focused drops its text.
+    ///
+    /// Keyed off every task in the store, not the rows on screen, so closing a
+    /// branch does not throw away what was typed into it.
+    func pruneDrafts(under existing: Set<UUID>) {
+        // Snapshots, not live views: removing from a `Set` while iterating it
+        // is undefined, and the loop variable would be skipped.
+        let staleDrafts = childDrafts.keys.filter { !existing.contains($0) }
+        for parent in staleDrafts {
+            childDrafts[parent] = nil
+        }
+
+        let staleRows = openDraftRows.filter { !existing.contains($0) }
+        for parent in staleRows {
+            openDraftRows.remove(parent)
+        }
     }
 }

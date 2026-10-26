@@ -19,9 +19,33 @@ enum Theme {
     static let accent = Color(red: 0.35, green: 0.82, blue: 0.55)
     static let danger = Color(red: 0.98, green: 0.42, blue: 0.40)
 
+    /// One radius for the panel's fill, its hairline and its clip.
+    ///
+    /// They were three separate `14`s at one point, which is three chances to
+    /// be wrong: a hairline on a different curve from the fill it outlines does
+    /// not read as an edge, it reads as a mistake.
+    static let cornerRadius: CGFloat = 14
+
+    /// The hairline around the panel.
+    ///
+    /// `border` — the same cool grey as the dividers inside the panel, which is
+    /// what keeps the panel reading as one object rather than a list with a box
+    /// drawn round it. Against this background it lands near #2e3038: an edge
+    /// you can see over a light wallpaper, and nothing you can name over a dark
+    /// one.
+    static let panelBorder = border
+
     static let monospaced = Font.system(size: 13.5, weight: .regular, design: .monospaced)
     static let monospacedSmall = Font.system(size: 11, weight: .regular, design: .monospaced)
     static let promptFont = Font.system(size: 14, weight: .medium, design: .monospaced)
+
+    /// The row's text size as an AppKit font.
+    ///
+    /// The inline title editor draws with this rather than with the prompt's,
+    /// so that editing a task does not make its text jump. A row is 13.5pt
+    /// regular and `PromptField` is 14pt medium, and the difference was visible
+    /// every single time a typo was corrected.
+    static let rowFont = NSFont.monospacedSystemFont(ofSize: 13.5, weight: .regular)
 
     /// Shared by every label in the settings popover, so the toggle and the
     /// shortcut rows are the same size rather than three different ones.

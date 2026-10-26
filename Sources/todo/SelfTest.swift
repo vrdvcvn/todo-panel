@@ -47,6 +47,11 @@ enum SelfTest {
         selection(r)
         nesting(r)
         keys(r)
+        focus(r)
+        editing(r)
+        caret(r)
+        resilience(r)
+        dailyUse(r)
 
         print("selftest: \(r.passed) passed, \(r.failures.count) failed")
         for failure in r.failures {
@@ -260,15 +265,21 @@ enum SelfTest {
                     s.parentOfDraftRow(ids.child) == nil)
         }
 
-        // Adding a task and opening it must be one undo step. Two would mean
-        // ⌘Z closed the task and left it there, needing a second press to
-        // remove — a task undo has to be immune to that.
+        // Adding a task must leave it closed. It used to arrive open, with the
+        // caret dropped into a sub-task row beneath it, so every task ever
+        // added kept an arrow and an `"expanded": true` on disk — including the
+        // overwhelming majority that never had a sub-task.
         do {
             let (s, url) = store()
             defer { try? FileManager.default.removeItem(at: url) }
-            let id = s.addAndOpen("go market")
-            r.check("keys: addAndOpen hands back the new task", id != nil)
-            r.check("keys: and the task arrives open", s.items.first { $0.id == id }?.expanded == true)
+            let id = s.add("go market")
+            r.check("keys: add hands back the new task", id != nil)
+            // The other half of the same promise — that adding a task implies no
+            // blank sub-task row under it — is `submit()` not calling
+            // `showDraftRow`, which is a view rule with no command-line test and
+            // no honest way to fake one. It is covered by the manual pass in the
+            // plan's Verification section. This is the half that was wrong.
+            r.check("keys: and the task arrives closed", s.items.first { $0.id == id }?.expanded == false)
             s.undo()
             r.equal("keys: one undo removes it entirely", s.items.count, 0)
         }
@@ -280,9 +291,9 @@ enum SelfTest {
             s.add("c")
             s.undo()
             r.equal("keys: add is one undo step", s.items.map(\.title), ["a", "b"])
-            s.addAndOpen("d")
+            s.add("d")
             s.undo()
-            r.equal("keys: and so is add-and-open", s.items.map(\.title), ["a", "b"])
+            r.equal("keys: and so is every other add", s.items.map(\.title), ["a", "b"])
         }
 
         // A blank row that was looked at and walked away from has to leave no
@@ -584,7 +595,6 @@ enum SelfTest {
         let a = ["a", "b", "c", "d"].map { TodoItem(title: $0) }
 
         let ids = a.map(\.id)
-        let alone = { (id: UUID) in Set([id]) }
 
         model.select(a[1].id)
         model.select(a[2].id)
@@ -683,5 +693,576 @@ enum SelfTest {
         model.resetToInput()
         r.check("select: reopening clears the highlight", model.selection.isEmpty)
         r.check("select: reopening keeps the draft", model.draft == "half a task")
+    }
+
+    // MARK: - Focus
+
+    /// Which field the caret is in, and what the keys should do about it.
+    ///
+    /// Every one of these was a question the panel answered about the wrong
+    /// field. The panel has two, and focus requests only ever moved the answer
+    /// one way — so clicking straight into a field left the model still
+    /// describing the field the keyboard was last *sent* to. ⌘Z then decided
+    /// there was no typing to protect and undid a task instead.
+    private static func focus(_ r: Results) {
+        let m = PanelModel()
+        let parent = UUID()
+
+        m.draft = "call mum"
+        r.equal("focus: the top prompt is the focused field to begin with",
+                m.focusedText, "call mum")
+        r.check("focus: and nothing is focused in a blank row", m.focusedDraftParent == nil)
+
+        m.requestChildFocus(parent)
+        r.check("focus: the caret can be in a blank sub-task row",
+                m.focusedDraftParent == parent)
+        r.equal("focus: which reports the root draft, which is empty",
+                m.focusedText, "")
+
+        m.setDraft("buy milk", for: parent)
+        r.equal("focus: and reports the sub-task text instead",
+                m.focusedText, "buy milk")
+
+        // Clicking into the top prompt is not a focus request, so nothing else
+        // moves the answer. This is that route.
+        m.adoptInputTarget(.root)
+        r.equal("focus: clicking into the prompt makes it the focused field",
+                m.focusedText, "call mum")
+        r.check("focus: and nothing is in a blank row any more",
+                m.focusedDraftParent == nil)
+        r.check("focus: clicking into a field is not a list keypress",
+                m.mode == .input)
+
+        // ...and it must not quietly undo the selection, which is a different
+        // thing that only a deliberate hand-off should do.
+        let task = UUID()
+        m.select(task)
+        m.adoptInputTarget(.child(parent))
+        r.equal("focus: adopting a field leaves the selection alone",
+                m.selection, [task])
+
+        // "Unused" has to mean the same thing to every rule that asks, or a row
+        // holding nothing but spaces is blank to the save path and full to the
+        // dismissal path: Return declines to add a task, Delete declines to
+        // remove the row, and nothing else can move it either.
+        m.setDraft("   ", for: parent)
+        r.check("focus: a row holding only spaces counts as unused",
+                m.draftIsBlank(parent))
+        m.setDraft(" x ", for: parent)
+        r.check("focus: a row with real text does not", !m.draftIsBlank(parent))
+        r.check("focus: an untouched row counts as unused",
+                m.draftIsBlank(UUID()))
+
+        m.showDraftRow(for: parent)
+        r.check("focus: a row asked for is on screen", m.isDraftRowOpen(parent))
+        m.pruneDrafts(under: [])
+        r.check("focus: and is forgotten when its task is gone",
+                !m.isDraftRowOpen(parent))
+        r.check("focus: along with the half-typed text in it", m.focusedText != " x ")
+    }
+
+    // MARK: - Editing
+
+    /// Correcting a title in place, and where the caret lands when you do.
+    private static func editing(_ r: Results) {
+        let m = PanelModel()
+        let id = UUID()
+
+        m.beginEditing(id: id, title: "buy binto")
+        r.check("edit: the field being corrected is the focused one",
+                m.inputTarget == .edit(id))
+        r.check("edit: and it is the only thing ⌘Z would undo", m.focusedText == "buy binto")
+        r.check("edit: a new edit starts with the title, not a blank",
+                m.editDraft == "buy binto")
+            r.check("edit: a title already exists, so ⌘Z is always about the text",
+                    m.isEditingTitle)
+
+        // Where the caret goes is the whole point of ← and →: one keystroke
+        // after the editor opens either appends to the title or rewrites it from
+        // the front. Asking for the start has to survive, and has to be a
+        // position rather than a flag — the field is the only thing that knows
+        // how long the text is at the moment it is drawn.
+        r.equal("edit: a new edit asks for the end by default", m.editCaretOffset, 9)
+        m.beginEditing(id: id, title: "buy binto", caret: .end)
+        r.equal("edit: ⇧Return asks for the end", m.editCaretOffset, 9)
+        m.beginEditing(id: id, title: "buy binto", caret: .start)
+        r.equal("edit: ← asks for the start", m.editCaretOffset, 0)
+        // The end is a position, not a fixed number, so it moves as the title is
+        // typed — which is also why it has to be re-asked for here: the caret
+        // asked for is the one in force until the next edit begins.
+        m.beginEditing(id: id, title: "buy milk", caret: .end)
+        r.equal("edit: and the end follows the text as it is typed",
+                m.editCaretOffset, 8)
+
+        // Escape puts the old one back without touching the store — which is
+        // what the store tests below check. The model's own job is to stop
+        // pointing at the task, so nothing downstream can commit the text.
+        m.cancelEditing()
+        r.check("edit: Escape ends the edit", m.editing == nil)
+        r.check("edit: and leaves nothing behind to commit",
+                m.editDraft.isEmpty && m.inputTarget == .root)
+
+        // Return keeps it, and hands the keyboard back to the list with the row
+        // still picked — so Space straight after a correction ticks the task
+        // you just fixed, not whatever the list re-sorted into place.
+        m.beginEditing(id: id, title: "buy binto")
+        m.setEditDraft("buy milk")
+        m.finishEditing()
+        r.check("edit: committing ends the edit", m.editing == nil)
+        r.equal("edit: the keyboard goes back to the list", m.mode, .list)
+        r.equal("edit: with the row still selected", m.selection, [id])
+        r.equal("edit: and the text is the caller's to commit", m.editDraft, "")
+
+        // The top prompt is the opposite case: it holds something that does not
+        // exist yet, so an empty one means ⌘Z belongs to the list.
+        let fresh = PanelModel()
+        r.check("edit: an empty prompt is not a title being edited",
+                !fresh.isEditingTitle)
+    }
+
+    // MARK: - Caret placement
+
+    /// Where the caret lands when a title editor opens.
+    ///
+    /// Two coordinate systems meet here and they do not agree. `PanelModel`
+    /// counts characters, because that is what `String.count` means and what the
+    /// person typing thinks they are doing; AppKit's `NSRange` counts UTF-16
+    /// units, because that is what a text buffer is made of. The first mismatch
+    /// this found was an emoji: one character, two units, and the caret landed
+    /// inside the surrogate pair, where AppKit put it back wherever it liked.
+    private static func caret(_ r: Results) {
+        let m = PanelModel()
+        // Ten characters, eleven UTF-16 units.
+        m.beginEditing(id: UUID(), title: "buy milk 🎉", caret: .end)
+        r.equal("caret: the end is counted in characters, not UTF-16 units",
+                m.editCaretOffset, 10)
+        m.beginEditing(id: UUID(), title: "buy milk 🎉", caret: .start)
+        r.equal("caret: and the start is always zero", m.editCaretOffset, 0)
+
+        // The conversion itself, rather than only the contract it serves — a
+        // helper nothing can reach is a helper nothing can check.
+        r.equal("caret: a character offset becomes a UTF-16 offset",
+                PromptField.utf16Offset(10, in: "buy milk 🎉"), 11)
+        r.equal("caret: plain ASCII is its own conversion",
+                PromptField.utf16Offset(8, in: "buy milk"), 8)
+        r.equal("caret: and nothing before the text is no offset at all",
+                PromptField.utf16Offset(-1, in: "buy milk"), 0)
+    }
+
+    // MARK: - Resilience
+
+    /// A hand-editable file is allowed to be a strange one, and nothing here may
+    /// cost the user their list.
+    private static func resilience(_ r: Results) {
+        // Ids are the list's only identity. Two rows sharing one used to be
+        // handed straight to SwiftUI as a `ForEach` key, and `toggleRoots` built
+        // a dictionary with `uniqueKeysWithValues:` — which traps rather than
+        // failing, so pressing Space on such a list killed the process.
+        do {
+            let url = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("todo-selftest-dupes-\(UUID().uuidString).json")
+            defer { try? FileManager.default.removeItem(at: url) }
+
+            let shared = UUID()
+            let list = [
+                TodoItem(id: shared, title: "first", createdAt: Date(timeIntervalSince1970: 100)),
+                TodoItem(id: shared, title: "second", createdAt: Date(timeIntervalSince1970: 200)),
+                TodoItem(title: "third"),
+            ]
+            try! JSONEncoder.todo.encode(list).write(to: url)
+
+            let reopened = TodoStore(fileURL: url)
+            reopened.load()
+            r.equal("load: a repeated id is dropped, not doubled",
+                    reopened.items.map(\.title), ["first", "third"])
+            r.check("load: and the file is corrected on disk",
+                    try! String(contentsOf: url, encoding: .utf8).contains("\"second\"") == false)
+            // Would have trapped.
+            reopened.toggleRoots(ids: reopened.items.map(\.id))
+            r.check("load: ticking such a list survives", reopened.items.allSatisfy(\.done))
+        }
+
+        // Keys in the file that this build does not model are the user's, and
+        // reading the list must not quietly delete them.
+        do {
+            let url = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("todo-selftest-extra-\(UUID().uuidString).json")
+            defer { try? FileManager.default.removeItem(at: url) }
+
+            let id = UUID()
+            let hand = """
+            [{"id":"\(id.uuidString)","title":"hand written","done":false,\
+            "createdAt":"2026-01-01T00:00:00Z","priority":3}]
+            """
+            try! Data(hand.utf8).write(to: url)
+
+            let store = TodoStore(fileURL: url)
+            store.load()
+            r.equal("load: a hand-written field does not stop the list loading",
+                    store.items.map(\.title), ["hand written"])
+            r.check("load: and reading it does not rewrite the file",
+                    try! String(contentsOf: url, encoding: .utf8).contains("\"priority\""))
+        }
+
+        // A reload is the start of a session, not a point in a timeline.
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            s.add("a")
+            s.add("b")
+            s.undo()
+            r.check("load: there is something to undo first", s.canUndo)
+
+            s.load()
+            r.check("load: a reload starts a fresh history", !s.canUndo && !s.canRedo)
+            r.equal("load: and leaves the list alone", titles(s), ["a"])
+        }
+
+        // An action that changes nothing must not spend a ⌘Z press.
+        //
+        // One block, not two. It was written twice, byte for byte down to the
+        // assertion labels, so eight of the count were really four — and a count
+        // that overstates what is covered is worse than a low one, because it is
+        // the number people read to decide whether anything is checked here.
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            s.add("a")
+            s.undo()
+            r.check("quiet: history is empty to begin with", !s.canUndo)
+
+            s.delete(ids: [UUID()])
+            r.check("quiet: deleting something that is not there costs no history",
+                    !s.canUndo)
+
+            s.toggle(ids: [UUID()])
+            r.check("quiet: ticking something that is not there costs no history",
+                    !s.canUndo)
+        }
+
+        // Tab opens or closes a branch, and turns a task with nothing under it
+        // into a list. On a sub-task it has no branch to act on at all, and the
+        // store says so rather than flipping a flag nothing draws — which used
+        // to cost a ⌘Z press on a keystroke that changed nothing on screen.
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            let ids = tree(s)
+
+            r.check("tab: a task with a branch can be toggled",
+                    s.canToggleExpanded(id: ids.parent))
+            r.check("tab: a sub-task cannot", !s.canToggleExpanded(id: ids.child))
+            r.check("tab: neither can something that is not there",
+                    !s.canToggleExpanded(id: UUID()))
+
+            let depth = s.canUndo
+            s.toggleExpanded(id: ids.child)
+            r.equal("tab: toggling a sub-task leaves the flag alone",
+                    s.items.first { $0.id == ids.child }?.expanded, false)
+            r.equal("tab: and records nothing to undo", s.canUndo, depth)
+        }
+    }
+
+    // MARK: - Daily use
+
+    /// The things a person does every day, and what used to happen to them.
+    private static func dailyUse(_ r: Results) {
+        // A new task is a task, not a branch. It used to arrive open, with the
+        // caret dropped into a sub-task row beneath it, and nothing ever took
+        // that back — so every task ever added kept a permanent green `v` and
+        // an `"expanded": true` on disk, including the overwhelming majority
+        // that never had a sub-task. A plain list of thirty reminders looked
+        // like a tree.
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            let id = s.add("buy milk")
+            r.check("daily: a new task arrives closed", s.items.first?.expanded == false)
+
+            // Opened by hand — which is all a branch ever was — and then left
+            // with nothing under it.
+            s.setExpanded(true, id: id ?? UUID())
+            r.check("daily: opening it is still possible", s.items.first?.expanded == true)
+
+            s.collapseIfChildless(id: id ?? UUID())
+            r.check("daily: leaving it with nothing under it takes the flag back",
+                    s.items.first?.expanded == false)
+            r.check("daily: and the arrow goes with it",
+                    s.branches.first { $0.item.id == id }?.children.isEmpty == true)
+        }
+
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            let ids = tree(s)
+            s.collapseIfChildless(id: ids.parent)
+            // `tree` leaves the parent open; collapsing must not have closed a
+            // branch that still has something in it.
+            r.check("daily: a task with sub-tasks stays open",
+                    s.items.first { $0.id == ids.parent }?.expanded == true)
+            s.setExpanded(false, id: ids.parent)
+            s.collapseIfChildless(id: ids.parent)
+            r.equal("daily: and once emptied it goes back",
+                    s.items.first { $0.id == ids.parent }?.expanded, false)
+        }
+
+        // "Looked at a blank row and walked away" must stay out of the history.
+        // A step for it would mean the first ⌘Z after adding a task does nothing
+        // visible and the second removes it — the two-press undo a task add has
+        // to be immune to.
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            s.add("buy milk")
+            s.undo()
+            r.check("daily: nothing to undo to begin with", !s.canUndo)
+
+            s.add("buy milk")
+            r.check("daily: adding one is a step", s.canUndo)
+        }
+        // And the same for opening a branch to type into it, which is what
+        // Return and Tab now both do. Open it, change nothing, close it: the
+        // list is exactly as it was, so the history has to be exactly as it was
+        // too — one ⌘Z has to remove the task, not tidy up after it.
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            let id = s.add("buy milk")
+            r.check("keys: adding one is the only step so far", s.canUndo)
+
+            s.openWithoutHistory(id: id ?? UUID())
+            r.check("keys: opening a branch to type into it works",
+                    s.items.first?.expanded == true)
+
+            s.collapseIfChildless(id: id ?? UUID())
+            r.check("keys: leaving it empty closes it again",
+                    s.items.first?.expanded == false)
+
+            s.undo()
+            r.equal("keys: so one undo still removes the task", s.items.count, 0)
+            r.check("keys: with nothing left to undo", !s.canUndo)
+        }
+
+        // Taking the last sub-task out of a branch has to take the branch's
+        // "opened" with it, or the row above is left holding an arrow over an
+        // empty space. And it must not cost an undo step of its own: one ⌘Z
+        // after a delete brings the branch back exactly as it was.
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            let ids = tree(s)
+
+            s.delete(ids: [ids.child])
+            r.check("daily: deleting the last sub-task closes the parent",
+                    s.items.first { $0.id == ids.parent }?.expanded == false)
+
+            s.undo()
+            r.equal("daily: and one undo brings the branch back intact",
+                    s.branches.first { $0.id == ids.parent }?.children.map(\.item.title),
+                    ["buy banana"])
+            r.check("daily: still open, because it has something under it",
+                    s.items.first { $0.id == ids.parent }?.expanded == true)
+        }
+
+        // A branch is only closed once the *last* thing under it goes, however
+        // many deletes it takes to get there.
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            let ids = tree(s)
+            s.addSubtask("buy bread", under: ids.parent)
+            let bread = s.items.first { $0.title == "buy bread" }!.id
+
+            s.delete(ids: [ids.child])
+            r.check("daily: a branch with a sub-task left stays open",
+                    s.items.first { $0.id == ids.parent }?.expanded == true)
+
+            s.delete(ids: [bread])
+            r.check("daily: and closes when the last one goes",
+                    s.items.first { $0.id == ids.parent }?.expanded == false)
+        }
+
+        // A list written by an older build has the stale flag all over it, and
+        // it should not come back on screen.
+        do {
+            let url = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("todo-selftest-stale-\(UUID().uuidString).json")
+            defer { try? FileManager.default.removeItem(at: url) }
+            let lonely = UUID()
+            let list = [
+                TodoItem(id: lonely, title: "never had a sub task", expanded: true),
+                TodoItem(title: "plain"),
+            ]
+            try! JSONEncoder.todo.encode(list).write(to: url)
+
+            let reopened = TodoStore(fileURL: url)
+            reopened.load()
+            r.check("daily: a stale flag from an older build is ignored on load",
+                    reopened.items.first { $0.id == lonely }?.expanded == false)
+            r.check("daily: and reading it did not rewrite the user's file",
+                    try! String(contentsOf: url, encoding: .utf8).contains("\"expanded\" : true"))
+        }
+
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            let ids = tree(s)
+            let reopened = TodoStore(fileURL: url)
+            reopened.load()
+            // The parent here really does have sub-tasks, so its "opened" is
+            // telling the truth and must survive the tidying.
+            r.check("daily: a genuine 'opened' survives the tidying",
+                    reopened.items.first { $0.id == ids.parent }?.expanded == true)
+        }
+
+        // Fixing a typo. There was no way to do it at all, which meant deleting
+        // the task — losing its place in the list and every sub-task under it —
+        // over one wrong letter.
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            s.add("call mum")
+            let loose = s.items[0].id
+
+            r.check("edit: a rename to the same text does nothing",
+                    !s.rename(id: loose, to: "call mum"))
+            r.check("edit: a rename to nothing is refused",
+                    !s.rename(id: loose, to: "   "))
+            // One undo still removes the task, which is only true if neither
+            // refusal was recorded.
+            s.undo()
+            r.check("edit: neither refusal cost an undo step", s.items.isEmpty)
+        }
+
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            s.add("call mum")
+            let loose = s.items[0].id
+
+            r.check("edit: a real rename works",
+                    s.rename(id: loose, to: "  call mum and dad  "))
+            r.equal("edit: and is trimmed", s.items.first?.title, "call mum and dad")
+
+            s.undo()
+            r.equal("edit: one undo puts the title back", s.items.first?.title, "call mum")
+        }
+
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            let ids = tree(s)
+            r.check("edit: a sub-task's parent is still there to be renamed",
+                    s.rename(id: ids.child, to: "buy bananas"))
+            r.equal("edit: and renaming it leaves the tree alone", s.items.count, 3)
+        }
+
+        // Clearing the day's work. Ticking was one keystroke and clearing was
+        // impossible, so a used list filled with struck-through rows and the
+        // work still to do got pushed off the bottom of the panel.
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            s.add("a")
+            s.add("b")
+            s.add("c")
+            s.toggle(ids: s.items.map(\.id))
+            r.equal("daily: three finished", s.doneCount, 3)
+
+            s.clearCompleted()
+            r.check("daily: clearing empties the list", s.items.isEmpty)
+            s.undo()
+            r.equal("daily: and one undo brings back the whole day", s.items.count, 3)
+            r.check("daily: with them still finished", s.doneCount == 3)
+        }
+
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            s.add("a")
+            s.add("b")
+            s.toggle(id: s.items[1].id)
+            s.clearCompleted()
+            r.equal("daily: clearing keeps what is still open",
+                    s.items.map(\.title), ["a"])
+        }
+
+        // The footer has to agree with the screen. Counting sub-tasks made a list
+        // showing eight open rows read "11 open", and nothing on screen said
+        // where the other three came from.
+        do {
+            let (s, url) = store()
+            defer { try? FileManager.default.removeItem(at: url) }
+            let ids = tree(s)
+            r.equal("daily: the count matches the rows on screen", s.openCount, 2)
+            r.equal("daily: and so does the finished count", s.doneCount, 0)
+
+            s.toggle(id: ids.loose)
+            r.equal("daily: a finished task is counted once", s.doneCount, 1)
+            let openBefore = s.openCount
+            s.toggle(id: ids.child)
+            r.check("daily: a finished sub-task does not inflate it", s.doneCount == 1)
+            r.equal("daily: and does not move the open count either",
+                    s.openCount, openBefore)
+        }
+
+        do {
+            // Loaded from disk rather than built, because "nothing is finished"
+            // is the state a freshly opened panel is in, and a freshly opened
+            // panel has no undo history to spend.
+            let url = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("todo-selftest-nofin-\(UUID().uuidString).json")
+            defer { try? FileManager.default.removeItem(at: url) }
+            try! JSONEncoder.todo.encode([TodoItem(title: "a"), TodoItem(title: "b")])
+                .write(to: url)
+
+            let s = TodoStore(fileURL: url)
+            s.load()
+            r.check("daily: nothing finished, and no history to begin with",
+                    !s.canUndo && s.doneCount == 0)
+
+            s.clearCompleted()
+            r.check("daily: clearing nothing costs nothing", !s.canUndo && s.items.count == 2)
+        }
+
+        // The scrolling rule. Following every selection change scrolled the row
+        // you had just *clicked* to the middle of the panel — the pointer had
+        // put it on screen, so the only thing the scroll achieved was losing
+        // the rows either side of what you were reading.
+        do {
+            let m = PanelModel()
+            let ids = [UUID(), UUID(), UUID()]
+
+            m.select(ids[0])
+            r.check("scroll: clicking a row asks for no scroll", m.scrollTarget == nil)
+
+            m.moveSelection(by: 1, extending: false, in: ids)
+            r.equal("scroll: the arrow keys do ask for one", m.scrollTarget, ids[1])
+            m.clearScrollTarget()
+            r.check("scroll: and the list clears it once it has followed", m.scrollTarget == nil)
+
+            m.toggleInSelection(ids[2])
+            r.check("scroll: ⌘-clicking does not either", m.scrollTarget == nil)
+        }
+
+        // Closing the panel is a way of leaving a blank sub-task row, so an
+        // empty one left behind that way came straight back next time.
+        do {
+            let m = PanelModel()
+            let (a, b) = (UUID(), UUID())
+            m.showDraftRow(for: a)
+            m.setDraft("buy milk", for: b)
+
+            let discarded = m.discardUnusedDraftRows()
+            r.equal("daily: only the unused row is taken away", discarded, [a])
+            r.check("daily: and it is gone", !m.isDraftRowOpen(a))
+            r.equal("daily: the one with text in it stays", m.draft(for: b), "buy milk")
+        }
+
+        do {
+            let m = PanelModel()
+            r.check("daily: nothing to discard to begin with",
+                    m.discardUnusedDraftRows().isEmpty)
+        }
     }
 }

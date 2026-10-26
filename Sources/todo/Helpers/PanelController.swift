@@ -53,7 +53,18 @@ final class PanelController {
                 // A focused field with text in it means ⌘Z belongs to the text:
                 // there are characters worth recovering, and losing them is
                 // worse than making someone press undo twice.
-                if let editor = self.fieldEditor, !self.model.draft.isEmpty {
+                //
+                // `focusedText` rather than `model.draft`, because the panel has
+                // three kinds of field. While the caret was in a blank sub-task
+                // row the root draft is empty — so the test below was false,
+                // ⌘Z fell through to the task history, and one keystroke removed
+                // a task instead of undoing the characters you had just typed.
+                //
+                // A title editor is always about the text, empty or not: it is
+                // holding a task that already exists, and emptying it and asking
+                // for it back must not delete it.
+                if let editor = self.fieldEditor,
+                   self.model.isEditingTitle || !self.model.focusedText.isEmpty {
                     isRedo ? editor.undoManager?.redo() : editor.undoManager?.undo()
                     return nil
                 }
@@ -116,7 +127,7 @@ final class PanelController {
         // `show()` resets to the input screen, so the flag is set afterwards.
         if !isVisible { show() }
         model.showingSettings = open
-        requestFocus(forCurrentMode: model.mode)
+        focusForCurrentScreen()
     }
 
     func show() {
@@ -127,13 +138,35 @@ final class PanelController {
         let window = self.window ?? makeWindow()
         self.window = window
 
+        // Two Spaces, two answers. The hotkey is pressed from whichever one the
+        // user is looking at, and `isVisible` has already said this Space does
+        // not have the panel in it.
+        Diag.log("show (visible=\(window.isVisible) onActiveSpace=\(window.isOnActiveSpace))")
+
+        // A window already ordered in on *another* Space does not migrate when
+        // you order it in again from here: it stays where it was, which reads as
+        // ⌥Space doing nothing — the panel is on the desktop, you are in a
+        // fullscreen app, and there is nothing in front of you. Taking it out
+        // first is what makes the Space switch below a move rather than a
+        // second order-in to an existing one.
+        if window.isVisible && !window.isOnActiveSpace {
+            window.orderOut(nil)
+        }
+
         center(window)
 
-        window.makeKeyAndOrderFront(nil)
+        // Activate *before* ordering front. The other order leaves the panel
+        // behind the app it was summoned over for a runloop turn, which is long
+        // enough to see.
         NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        // Belt and braces: `makeKeyAndOrderFront` is a request, and a window
+        // that has just been moved between Spaces can be refused by an app that
+        // is still animating. This one is not a request.
+        window.orderFrontRegardless()
         window.makeKey()
 
-        requestFocus(forCurrentMode: model.mode)
+        focusForCurrentScreen()
 
         // SwiftUI applies `updateNSView` during the next layout pass. Asking a
         // second time on the next runloop turn guarantees the right view really
@@ -141,20 +174,64 @@ final class PanelController {
         // rather than only usually being so.
         DispatchQueue.main.async { [weak self] in
             guard let self, window.isVisible else { return }
-            self.requestFocus(forCurrentMode: model.mode)
+            self.focusForCurrentScreen()
         }
     }
 
-    /// Settings mode has no text field at all, so focus has to go to the list
-    /// key catcher — otherwise Escape has nowhere to arrive.
-    private func requestFocus(forCurrentMode mode: PanelModel.Mode) {
-        switch mode {
+    /// Puts the keyboard where the screen that is currently showing wants it.
+    ///
+    /// The settings drawer is the reason this is not just `model.mode`: it has
+    /// no text field at all, so the caret cannot go anywhere and Escape needs
+    /// the list key catcher to arrive. Routing on the mode alone sent focus to
+    /// the prompt behind the drawer — a field that is not on screen, and is
+    /// disabled while the drawer is open, so it refuses first responder and
+    /// Escape goes nowhere. That is the state `todo --settings` opens in, which
+    /// is the only way a script can reach the drawer at all.
+    /// Saves an open title edit, if there is one.
+    ///
+    /// Closing the panel in the middle of a correction is not a reason to throw
+    /// the correction away — it is the same as walking away from a half-typed
+    /// task, which is kept on purpose.
+    private func commitEdit() {
+        guard let id = model.editing else { return }
+        let text = model.editDraft
+        model.finishEditing()
+        store.rename(id: id, to: text)
+    }
+
+    private func focusForCurrentScreen() {
+        if model.showingSettings {
+            model.enterList()
+            return
+        }
+        switch model.mode {
         case .input: model.requestInputFocus()
         case .list: model.enterList()
         }
     }
 
     func hide() {
+        // A recorder that is still armed must be disarmed here. The capture
+        // view asks for the keyboard a runloop turn after it is armed, so if
+        // the panel is hidden in that window it was never first responder and
+        // nothing else will ever bring the recorder back down — leaving
+        // `HotKeyCenter` in recording mode, where it goes on ignoring the
+        // panel's own hotkey. ⌥Space would then do nothing at all, silently.
+        HotKeyCenter.shared.endRecording()
+
+        // An open edit would otherwise be abandoned mid-word with the caret no
+        // longer anywhere, and the next one would start from a half-typed title.
+        if model.editing != nil { commitEdit() }
+
+        // Closing the panel is a way of leaving a blank sub-task row, and the
+        // rule for that — take the row, and with it the "opened" flag — lives
+        // in `PanelView.hideDraftRow(for:)`. This is the one route the view
+        // cannot see, because the panel is on its way out and nothing is
+        // driving it. The loop stays; the rule does not get restated.
+        for parent in model.discardUnusedDraftRows() {
+            store.collapseIfChildless(id: parent)
+        }
+
         guard let window else { return }
         window.orderOut(nil)
         window.resignKey()
@@ -207,13 +284,31 @@ final class PanelController {
         return window
     }
 
+    /// Puts the panel in the middle of the display, wherever the pointer is.
+    ///
+    /// Centred on `frame`, not on `visibleFrame` — and the difference is 16.5pt
+    /// on this Mac. `visibleFrame` reserves the menu bar *even when it is set to
+    /// auto-hide and is not on screen*, so centring in it pushed the panel below
+    /// the middle of the display every time, for a menu bar nobody can see.
+    /// Measured: the window was landing at y 238 when the middle is y 221.
+    ///
+    /// Clamped afterwards so centring can never put the panel where something
+    /// would cover it. A Dock, or a menu bar that *is* showing, eats into the
+    /// usable area, and a panel behind the Dock is worse than one notch off
+    /// centre. On a screen too small to hold it, the clamp gives up and lets it
+    /// overflow rather than shoving it somewhere arbitrary.
     private func center(_ window: NSWindow) {
         guard let screen = activeScreen() else { return }
-        let visible = screen.visibleFrame
         let size = window.frame.size
-        window.setFrameOrigin(
-            NSPoint(x: visible.midX - size.width / 2, y: visible.midY - size.height / 2)
-        )
+
+        var x = screen.frame.midX - size.width / 2
+        var y = screen.frame.midY - size.height / 2
+
+        let visible = screen.visibleFrame
+        x = min(max(x, visible.minX), max(visible.minX, visible.maxX - size.width))
+        y = min(max(y, visible.minY), max(visible.minY, visible.maxY - size.height))
+
+        window.setFrameOrigin(NSPoint(x: x, y: y))
     }
 
     /// Prefers the display the pointer is on, so the panel appears where the

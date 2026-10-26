@@ -8,9 +8,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// delegate alive past `NSApplication.run()`.
     static weak var shared: AppDelegate?
 
-    /// Set by `--settings`; read by the settings popover when it is created.
-    static var opensSettingsOnLaunch = false
-
     private let store = TodoStore()
     private lazy var panel = PanelController(store: store)
 
@@ -19,7 +16,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the popover from a script — which makes screenshotting it impossible.
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
-        Self.opensSettingsOnLaunch = CommandLine.arguments.contains("--settings")
         NSApp.appearance = NSAppearance(named: .darkAqua)
 
         store.load()
@@ -31,7 +27,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // holding the same shortcut makes the panel flicker.
         HotKeyKeeper.stopStrays()
 
-        try? registerHotKeys()
+        do {
+            try registerHotKeys()
+        } catch {
+            // Swallowing this with `try?` left the app running with no way to
+            // summon it and no explanation: no Dock icon, no menu bar item, no
+            // hotkey. The alert below is the only thing that can say so.
+            presentHotKeyFailure(error)
+        }
 
         // `todo --show` opens the panel at launch. There is no Dock icon and no
         // menu bar item to click, so without this there is no way to drive the
@@ -79,7 +82,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard !HotKeyCenter.shared.isRecording else { return }
                 self?.panel.toggle()
             },
-            onQuit: { NSApp.terminate(nil) }
+            onQuit: {
+                // Same reason. Without this, arming "open todo" and then
+                // pressing the combination bound to "quit todo" recorded a new
+                // shortcut *and* quit the app — the recorder eating the
+                // keystroke it was supposed to be watching for.
+                guard !HotKeyCenter.shared.isRecording else { return }
+                NSApp.terminate(nil)
+            }
         )
     }
 

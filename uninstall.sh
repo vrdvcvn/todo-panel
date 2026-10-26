@@ -8,6 +8,7 @@
 set -uo pipefail
 
 APP_NAME="todo"
+KEEPER_NAME="todo-keep"
 BUNDLE_ID="com.arda.todo"
 APP="/Applications/$APP_NAME.app"
 SUPPORT="$HOME/Library/Application Support/$APP_NAME"
@@ -20,6 +21,16 @@ if pgrep -x "$APP_NAME" >/dev/null; then
     echo "Stopping $APP_NAME"
     pkill -x "$APP_NAME"
     sleep 0.5
+fi
+
+# The watcher holds the "open todo" shortcut while the app is closed, and it is
+# started on the app's way out — so removing the app and leaving it running
+# means a process that tries to launch something which is no longer there, and
+# which never gives the shortcut up on its own either.
+if pgrep -x "$KEEPER_NAME" >/dev/null; then
+    echo "Stopping $KEEPER_NAME"
+    pkill -x "$KEEPER_NAME"
+    sleep 0.2
 fi
 
 if [[ -d "$APP" ]]; then

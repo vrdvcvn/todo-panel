@@ -19,9 +19,10 @@ struct PanelView: View {
     /// One line in the list: either a task, or the blank row under an expanded
     /// task where the next sub-task gets typed.
     ///
-    /// The blank row is on screen from the moment a branch opens and stays
-    /// there even after Escape, so it is a row like any other — the arrow keys
-    /// land on it and it can be highlighted.
+    /// The blank row is on screen only because something asked for it — Return
+    /// or Tab on a task, or Return on a sub-task row — and it goes again the
+    /// moment it is left unused. It is a row like any other while it is there:
+    /// the arrow keys land on it and it can be highlighted.
     private enum ListRow: Identifiable {
         case task(TodoStore.Branch)
         case draft(parent: TodoStore.Branch)
@@ -55,10 +56,10 @@ struct PanelView: View {
             // The blank row comes last, after everything already saved, so it
             // reads as "the next one" rather than as the first. It belongs to
             // an *opened* task, not to one that happens to have children:
-            // pressing Tab on a task with nothing under it yet is how you ask
-            // for a sub-task in the first place, so the row has to be there
-            // before there is anything to show. It stops at the depth limit,
-            // where there is no deeper level to add.
+            // opening a task with nothing under it yet is how you ask for a
+            // sub-task in the first place, so the row has to be there before
+            // there is anything to show. It stops at the depth limit, where
+            // there is no deeper level to add.
             if branch.depth < TodoStore.maxDepth, model.isDraftRowOpen(branch.item.id) {
                 out.append(.draft(parent: branch))
             }
@@ -80,6 +81,16 @@ struct PanelView: View {
         tasks.filter { model.isSelected($0.id) }
     }
 
+    /// The task a row id belongs to, or `nil` for a blank sub-task row.
+    ///
+    /// Row ids are the thing the keyboard has; tasks are the thing everything
+    /// else works in. A key that acts on a task — Return to edit it, the arrows
+    /// to correct it — has to cross that gap, and a blank row has nothing on
+    /// the other side of it.
+    private func task(with id: UUID) -> TodoItem? {
+        tasks.first { $0.id == id }
+    }
+
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
@@ -97,21 +108,50 @@ struct PanelView: View {
         }
         .frame(width: PanelController.panelSize.width, height: PanelController.panelSize.height)
         .background(Theme.background)
+        // The hairline that makes the panel an object rather than a hole.
+        //
+        // Drawn *over* the background and *before* the clip, so it sits on top of
+        // everything — including the footer's own fill, which runs edge to edge
+        // and would otherwise paint over it at the bottom corners. `strokeBorder`
+        // rather than `stroke`: it draws inside the shape, so the panel stays
+        // 460×540 to the pixel and nothing reflows.
+        //
+        // `Theme.border`, the same cool grey as the dividers inside the panel.
+        // One hairline for the edge and the same one for the rows inside it is
+        // what keeps the panel reading as one thing.
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.cornerRadius, style: .continuous)
+                .strokeBorder(Theme.panelBorder, lineWidth: 1)
+        )
         // The clip must come *after* the background. Previously the background
         // was a bare Color inside the ZStack, which filled the whole frame as a
         // square — so the rounded clip on the content behind it never had any
         // effect and the four corners stayed square no matter what.
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .shadow(color: .black.opacity(0.55), radius: 40, x: 0, y: 18)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius, style: .continuous))
+        // No `.shadow` here, and that is deliberate rather than a shortcut.
+        //
+        // A shadow is a blur spreading *outward* from the edge, and a window can
+        // only draw inside itself. The window is exactly the size of the panel,
+        // so the blur had nowhere to fall — and instead of being clipped it
+        // displaced the panel by its own `y` offset. Measured off a screenshot:
+        // the panel came out 17pt too low, its bottom two corners drawn outside
+        // the window, with no shadow anywhere around it (the desktop was flat
+        // right up to the edge). That is the dark wedge at the corners.
+        //
+        // Giving the shadow room would mean a window larger than the panel, and
+        // the invisible band that comes with it swallows clicks near the panel —
+        // including the click that dismisses whatever it is covering. The
+        // hairline above earns the edge on its own, and costs none of that.
         .background(
             KeyCatcher(focusToken: model.listFocusToken, onKey: handleListKey)
                 .frame(width: 0, height: 0)
         )
         .preferredColorScheme(.dark)
-        .onChange(of: store.items) { model.retainSelection(in: rowIDs) }
-        // `onChange` does not fire for the initial value, so a panel opened
-        // with `--settings` would never ask to be resized.
-        
+        .onChange(of: store.items) { _, _ in
+            model.retainSelection(in: rowIDs)
+            model.pruneDrafts(under: Set(store.items.map(\.id)))
+            abandonCaretOnClosedBranch()
+        }
     }
 
     // MARK: - Input
@@ -134,13 +174,11 @@ struct PanelView: View {
                 isEnabled: !model.showingSettings,
                 onSubmit: submit,
                 onMoveDown: enterList,
-                // ↑ in the add-a-task bar is "caret to the start of the line",
-                // which is the normal thing to want there, so this does nothing.
+                // ↑ in the add-a-task bar jumps to the *last* row, matching
+                // ↓ in the list jumping back here. ↓ used to be the only way
+                // in, which made it the only way to reach the bottom of a
+                // long list without walking the whole thing.
                 onMoveUp: {
-                    // ↑ in the add-a-task bar jumps to the *last* row, matching
-                    // ↓ in the list jumping back here. ↓ used to be the only way
-                    // in, which made it the only way to reach the bottom of a
-                    // long list without walking the whole thing.
                     guard let last = rowIDs.last else { return }
                     activateRow(last)
                 },
@@ -148,7 +186,11 @@ struct PanelView: View {
                 // already a no-op, and letting it through would be the same.
                 onDelete: {},
                 onCancel: onClose,
-                onClearSelection: { model.select(nil) }
+                onClearSelection: { model.select(nil) },
+                // Clicking straight into the prompt is not a focus request, so
+                // without this the model goes on believing the keyboard is
+                // wherever we last sent it.
+                onEditingBegan: { model.adoptInputTarget(.root) }
             )
             .frame(height: 24)
         }
@@ -162,7 +204,7 @@ struct PanelView: View {
 
     @ViewBuilder
     private var list: some View {
-        if tasks.isEmpty && store.branches.isEmpty {
+        if tasks.isEmpty {
             VStack(spacing: 10) {
                 Text("nothing to do")
                     .font(Theme.monospaced)
@@ -183,14 +225,35 @@ struct PanelView: View {
                     }
                     .padding(.vertical, 6)
                 }
-                .onChange(of: model.selection) { _, newValue in
-                    // Follow the topmost selected row, not whichever one
-                    // happened to change last.
-                    guard let id = rows.first(where: { newValue.contains($0.id) })?.id else { return }
+                .onChange(of: model.scrollTarget) { _, id in
+                    // Only the arrow keys set this. Watching the selection
+                    // instead meant clicking a row scrolled it to the middle
+                    // of the panel — the pointer had just put the row under it,
+                    // so the only thing the scroll accomplished was losing the
+                    // rows either side of what you were reading.
+                    guard let id else { return }
                     proxy.scrollTo(id, anchor: .center)
+                    model.clearScrollTarget()
                 }
             }
         }
+    }
+
+    /// Takes the keyboard off a blank sub-task row whose branch has closed.
+    ///
+    /// A branch can close with the caret still in its blank row — from the
+    /// disclosure triangle, or from ⌘Z undoing the open — and the row is only
+    /// drawn while the branch is open. So the field goes with it while the model
+    /// goes on saying the keyboard is in there, and every keystroke after that
+    /// is delivered to a text field that is not on screen: nothing is typed and
+    /// nothing is heard. The view is the only place that knows the row is gone,
+    /// so the reconciliation has to happen here.
+    private func abandonCaretOnClosedBranch() {
+        guard let parent = model.focusedDraftParent else { return }
+        let stillOpen = store.items.first { $0.id == parent }?.expanded ?? false
+        guard !stillOpen else { return }
+        model.hideDraftRow(for: parent)
+        model.requestInputFocus()
     }
 
     /// Take a blank sub-task row away when it is being left unused.
@@ -205,15 +268,49 @@ struct PanelView: View {
     /// walked away from must be as though it had never been opened, or ⌘Z would
     /// start undoing things that were never done.
     private func dismissUnusedBlankRow() {
-        guard let id = model.focusedRow,
-              let parent = draftParent(for: id),
-              model.draft(for: parent).isEmpty else { return }
+        // The row being left is the one the caret is in, which is not the same
+        // question as "which row is selected". `requestChildFocus` clears the
+        // selection on the way in — deliberately, so a highlight cannot lie
+        // about what the keys are about to do — and that means every route out
+        // of a blank row arrived here with `focusedRow` nil and left the row
+        // sitting on screen for good. Arrowing off an empty sub-task row was
+        // supposed to take it away, and never did.
+        let parent: UUID?
+        if let focused = model.focusedDraftParent {
+            parent = focused
+        } else if let row = model.focusedRow {
+            parent = draftParent(for: row)
+        } else {
+            parent = nil
+        }
+
+        guard let parent, model.draftIsBlank(parent) else { return }
+        hideDraftRow(for: parent)
+    }
+
+    /// Takes a blank sub-task row away, and drops the parent's "opened" flag if
+    /// there is nothing left under it.
+    ///
+    /// Adding a task opens it so the caret can drop into a row beneath it, and
+    /// that flag was never taken back. Every task ever added kept a permanent
+    /// green `v` down the right-hand edge and an `"expanded": true` in the file,
+    /// including the great majority that never had a sub-task — so a plain list
+    /// of thirty reminders looked like a tree, and the marker claimed there was
+    /// something in here when there was not.
+    ///
+    /// Every route that hides a row goes through here, because the flag and the
+    /// row are the same decision.
+    private func hideDraftRow(for parent: UUID) {
         model.hideDraftRow(for: parent)
+        store.collapseIfChildless(id: parent)
     }
 
     /// Put the keyboard on a row: a task takes the list, a blank sub-task row
     /// takes the caret.
     private func activateRow(_ id: UUID) {
+        if let editing = model.editing, editing != id {
+            commitEdit()
+        }
         if draftParent(for: id) == nil {
             dismissUnusedBlankRow()
         }
@@ -261,7 +358,12 @@ struct PanelView: View {
                 focusToken: isFocused ? model.childFocusToken : 0,
                 placeholder: hasChildren ? "add another sub task" : "add a sub task",
                 isEnabled: isFocused,
-                onSubmit: { commitDraft(under: id, keepGoing: false) },
+                // Return saves this one and leaves a fresh blank row
+                // underneath, for writing several in a row without arrowing.
+                onSubmit: { commitDraft(under: id) },
+                // ⇧Return is the same verb, not a second one. It used to be the
+                // only key that stayed in the row, so it is an alias now.
+                onSubmitAndContinue: { commitDraft(under: id) },
                 onMoveDown: {
                     // Down steps to the row below, and off the bottom of the
                     // list into the add-a-task bar. Handing the keyboard to the
@@ -272,6 +374,9 @@ struct PanelView: View {
                     if let index = rowIDs.firstIndex(of: blankRow), index + 1 < rowIDs.count {
                         activateRow(rowIDs[index + 1])
                     } else {
+                        // Stepping off the end is still *leaving the row*, so an
+                        // untouched one goes with it.
+                        dismissUnusedBlankRow()
                         model.requestInputFocus()
                     }
                 },
@@ -286,12 +391,24 @@ struct PanelView: View {
                     // the parent directly found row 0 and sent ↑ back to the
                     // top of the list, which is what it did before.
                     let blankRow = id.draftRowID
+                    // A blank row is always preceded by its own parent, so
+                    // there is always something above it — but indexing is
+                    // indexing, and an empty list should walk away quietly
+                    // rather than trap.
+                    guard !rowIDs.isEmpty else { return }
                     let above = rowIDs[max(0, (rowIDs.firstIndex(of: blankRow) ?? 1) - 1)]
                     activateRow(above)
                 },
                 onDelete: { eraseBlankRow(for: id) },
-                onCancel: { model.requestInputFocus() },
-                onClearSelection: { model.clearSelection() }
+                onCancel: {
+                    // Escape leaves the row like any other route out of it, so an
+                    // empty one disappears instead of sitting under the branch
+                    // for the rest of the session.
+                    dismissUnusedBlankRow()
+                    model.requestInputFocus()
+                },
+                onClearSelection: { model.clearSelection() },
+                onEditingBegan: { model.adoptInputTarget(.child(id)) }
             )
             .frame(height: 24)
         }
@@ -300,6 +417,16 @@ struct PanelView: View {
         .padding(.trailing, 16)
         .padding(.vertical, 6)
         .background(isSelected ? Theme.selection : Color.clear)
+        // The same rule down the indent that a saved sub-task draws, so the
+        // line does not break for one row's height at the blank one — which is
+        // the row you are being invited to type into, and the last place the
+        // branch should stop reading as a branch.
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(Theme.border)
+                .frame(width: 1)
+                .padding(.leading, 16 + CGFloat(parent.depth) * Theme.indentWidth + 6)
+        }
         .overlay(alignment: .leading) {
             if isSelected {
                 Rectangle().fill(Theme.accent).frame(width: 2)
@@ -314,12 +441,17 @@ struct PanelView: View {
 
     private func taskRow(_ branch: TodoStore.Branch, isSelected: Bool) -> some View {
         let item = branch.item
-        // The arrow is shown on anything that has been opened, even if it is
-        // closed again with nothing typed — otherwise the row that created the
-        // sub-task would leave no way back to it. Once there are real children
-        // it stays for good.
-        let expandable = (item.expanded || store.hasChildren(item.id))
-            && branch.depth < TodoStore.maxDepth
+        let isEditing = model.editing == item.id
+        // Only a task with something under it gets an arrow.
+        //
+        // It used to be `item.expanded || hasChildren`, which drew a green `v`
+        // on every task ever added — adding opened a task so the caret could
+        // drop beneath it — including the great majority that never had a
+        // sub-task. A list of thirty reminders looked like a tree, and the
+        // marker claimed there was something in here when there was not. The
+        // "opened" flag is real state; it is just not a reason to draw
+        // something.
+        let expandable = store.hasChildren(item.id) && branch.depth < TodoStore.maxDepth
 
         return HStack(alignment: .firstTextBaseline, spacing: 10) {
             // The marker is its own button, so clicking the brackets ticks the
@@ -339,11 +471,15 @@ struct PanelView: View {
             // to read before deciding what to do with it. Sub-tasks get the same
             // treatment; the indent eats into the width, which is the cost of
             // nesting and the reason it stops at three levels.
-            Text(item.title)
-                .strikethrough(item.done, color: Theme.dim)
-                .foregroundStyle(item.done ? Theme.dim : Theme.primary)
-                .fixedSize(horizontal: false, vertical: true)
-                .multilineTextAlignment(.leading)
+            if isEditing {
+                titleEditor(item)
+            } else {
+                Text(item.title)
+                    .strikethrough(item.done, color: Theme.dim)
+                    .foregroundStyle(item.done ? Theme.dim : Theme.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading)
+            }
 
             Spacer(minLength: 0)
 
@@ -371,6 +507,23 @@ struct PanelView: View {
         .padding(.trailing, 16)
         .padding(.vertical, 6)
         .background(isSelected ? Theme.selection : Color.clear)
+        // A rule down the indent, so a run of sub-tasks reads as belonging to
+        // the task above them.
+        //
+        // Indent alone was not enough. Eighteen points is a nudge, not a
+        // grouping: by the third sub-task the parent is off the top of what you
+        // are looking at and the rows read as loose items that happen to sit a
+        // little further right. A tree view solves this with a guide line, and
+        // the reason it works is that it is continuous — you read membership
+        // from the line, not from measuring the text.
+        .overlay(alignment: .leading) {
+            if branch.depth > 0 {
+                Rectangle()
+                    .fill(Theme.border)
+                    .frame(width: 1)
+                    .padding(.leading, 16 + CGFloat(branch.depth - 1) * Theme.indentWidth + 6)
+            }
+        }
         .overlay(alignment: .leading) {
             if isSelected {
                 Rectangle().fill(Theme.accent).frame(width: 2)
@@ -379,10 +532,29 @@ struct PanelView: View {
         .contentShape(Rectangle())
         // SwiftUI's tap gesture does not report modifiers, so the live global
         // state is read instead — the same thing a native list view does.
-        .onTapGesture { selectWithMouse(item.id, modifiers: NSEvent.modifierFlags) }
+        //
+        // Clicking a row that is *already* highlighted opens it for editing.
+        // Not a double-click: by the time the second click arrived the row had
+        // been selected by the first, so the gesture was really "select, then
+        // edit", wearing a hat that made it feel like something else — and
+        // double-click is not available on a trackpad without a deliberate
+        // second press. A first click still only selects; ⌘-click and
+        // ⇧-click are about what is in the selection and never edit.
+        .onTapGesture {
+            let modifiers = NSEvent.modifierFlags
+            let plain = !modifiers.contains(.command) && !modifiers.contains(.shift)
+            if plain, model.isSelected(item.id), model.focusedRow == item.id {
+                beginEditing(item, caret: .end)
+            } else {
+                selectWithMouse(item.id, modifiers: modifiers)
+            }
+        }
         .contextMenu {
             Button(item.done ? "mark as not done" : "mark as done") {
                 store.toggle(id: item.id)
+            }
+            if !isEditing {
+                Button("edit title") { beginEditing(item, caret: .end) }
             }
             if expandable {
                 Button(item.expanded ? "close sub tasks" : "open sub tasks") {
@@ -402,7 +574,18 @@ struct PanelView: View {
     /// would type a space into a draft instead of ticking the task. It is
     /// skipped while a draft is being typed, so clicking a task mid-sentence
     /// does not pull the keyboard away mid-word.
+    ///
+    /// The test is the text in the field the caret is actually in, not the one
+    /// at the top: the panel has two, and only the top one used to be
+    /// consulted — so typing a sub-task and clicking a task pulled the keyboard
+    /// away mid-word anyway.
     private func selectWithMouse(_ id: UUID, modifiers: NSEvent.ModifierFlags) {
+        // Clicking somewhere else is committing an open correction, the same as
+        // clicking away in any list. Left open it would sit there looking
+        // editable long after you had moved on, with the caret nowhere.
+        if let editing = model.editing, editing != id {
+            commitEdit()
+        }
         if draftParent(for: id) == nil {
             dismissUnusedBlankRow()
         }
@@ -413,7 +596,7 @@ struct PanelView: View {
         } else {
             model.select(id)
         }
-        if model.draft.isEmpty {
+        if model.focusedText.isEmpty {
             model.enterList()
         }
     }
@@ -422,11 +605,13 @@ struct PanelView: View {
 
     private var footer: some View {
         HStack(spacing: 10) {
-            Text("\(store.openCount) open")
+            Text(countLabel)
 
-            Spacer()
+            Spacer(minLength: 0)
 
             Text(hint)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
 
             SettingsButton(isOpen: model.showingSettings) { toggleSettings() }
         }
@@ -437,14 +622,34 @@ struct PanelView: View {
         .background(Theme.surface)
     }
 
+    /// What is outstanding.
+    ///
+    /// Shows the finished count as soon as there are any, because that is the
+    /// moment they become something you want to throw away — and the hint
+    /// beside it is the only place the key that does it can be advertised.
+    private var countLabel: String {
+        store.doneCount > 0 ? "\(store.openCount) open · \(store.doneCount) done" : "\(store.openCount) open"
+    }
+
     private var hint: String {
         if model.showingSettings { return "esc to go back" }
         if model.mode == .input { return "↓ list · esc close" }
-        // Kept short enough to sit on one line. The first version of this ran to
-        // "↑↓ move · tab sub tasks · space toggle · ⌫ remove · esc type" and
-        // wrapped, which turned the footer into two lines and pushed the panel
-        // taller than the fixed frame.
-        return "↑↓ move · tab sub tasks · space · ⌫ · esc"
+
+        // Only the verbs that are not guessable: ↑↓, Space and ⌫ say what they
+        // do, and each of them is written on a row. Enter and ⇧Enter mean
+        // something new here, and neither is written anywhere.
+        //
+        // The short form of the plan's wording, because the long one does not
+        // fit: measured at 11pt monospaced this row has 394pt for the count and
+        // the hint together, and "↵ sub task · ⇧↵ edit · tab · space · esc" plus
+        // "· ⇧⌫ clear done" is 462pt with a two-digit count — so `lineLimit(1)`
+        // would have clipped it, which is the bug the shortened form exists to
+        // avoid. This one is 374pt, which fits.
+        var text = "↵ sub · ⇧↵ edit · tab · esc"
+        if store.doneCount > 0 {
+            text += " · ⇧⌫ clear done"
+        }
+        return text
     }
 
     /// Header shown in place of the prompt while settings are open.
@@ -535,7 +740,16 @@ struct PanelView: View {
                 .font(Theme.settingsLabel)
                 .foregroundStyle(Theme.primary)
                 .frame(width: 88, alignment: .leading)
-            KeyRecorder(role: role, onConflict: { shortcutError = $0 })
+            KeyRecorder(
+                role: role,
+                onConflict: { shortcutError = $0 },
+                isActive: model.showingSettings
+            ) {
+                // Recording ends with the keyboard still in the invisible
+                // capture view. Give it back to the panel, which is what makes
+                // Escape close the drawer afterwards.
+                model.enterList()
+            }
         }
     }
 
@@ -550,17 +764,19 @@ struct PanelView: View {
 
     /// Enter at the top prompt.
     ///
-    /// Saves the task and drops the caret into a sub-task row under it, so
-    /// "go market" ⏎ then "buy bananas" is one continuous motion. The task is
-    /// added already open as a single undo step — see `addAndOpen`.
+    /// Saves the task and leaves the caret where it is. It used to save the task
+    /// *and* open it *and* drop the caret into a sub-task row under it, so
+    /// adding three reminders left the list full of opened branches with nothing
+    /// in them, an arrow on every row, and the keyboard somewhere nobody had
+    /// asked it to be.
+    ///
+    /// Enter is "one more thing", so it stays here and the next Enter is the
+    /// next thing. Sub-tasks are asked for: ↵ on a highlighted task, or Tab.
     private func submit() {
         let text = model.draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         model.draft = ""
-
-        guard let id = store.addAndOpen(text) else { return }
-        model.showDraftRow(for: id)
-        model.requestChildFocus(id)
+        store.add(text)
     }
 
     private func enterList() {
@@ -590,22 +806,6 @@ struct PanelView: View {
         }
     }
 
-    private func cancelInput() {
-        // Escape peels one layer at a time: out of settings, out of the list,
-        // out of the draft, then out of the panel.
-        if model.showingSettings {
-            model.showingSettings = false
-            model.requestInputFocus()
-            return
-        }
-        if !model.draft.isEmpty {
-            model.draft = ""
-            model.requestInputFocus()
-            return
-        }
-        onClose()
-    }
-
     /// Keys while the list has focus.
     private func handleListKey(_ event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -629,12 +829,26 @@ struct PanelView: View {
             return true
         }
 
+        // Everything below acts on the selection, and every one of them is
+        // meant to be a bare keystroke. A combination that got here with
+        // ⌃⌥ or ⌘ still held is somebody else's shortcut — ⌥Space most of all,
+        // which is this app's own global hotkey and can only be reaching the
+        // panel if it failed to register. Acting on it would tick whatever
+        // happened to be selected, or throw the selection away.
+        guard !command,
+              !modifiers.contains(.control),
+              !modifiers.contains(.option)
+        else { return false }
+
         switch Int(event.keyCode) {
         case Int(KeyCode.arrowDown):
             // Down off the bottom row goes back to the add-a-task bar, so the
             // list is a loop you can walk out of at either end. Stopping dead
             // at the last task left the keyboard with nowhere to go but Esc.
             if !shift, model.isAtBottom(of: rowIDs) {
+                // Leaving the list is leaving the row too, so an untouched
+                // blank row at the very bottom goes with it.
+                dismissUnusedBlankRow()
                 model.requestInputFocus()
                 return true
             }
@@ -653,17 +867,32 @@ struct PanelView: View {
             return true
 
         case Int(KeyCode.space):
-            if !selectedItems.isEmpty {
-                // Roots only: ticking a parent leaves what is under it alone.
-                store.toggleRoots(ids: selectedItems.map(\.id))
-            }
+            tickSelection()
             return true
 
         case Int(KeyCode.delete), Int(KeyCode.forwardDelete):
+            // Shift+Delete throws away everything already finished. Ticking is
+            // one keystroke and this is the only thing that undoes a day of
+            // it; without it the list fills with struck-through rows and the
+            // work still to do gets pushed off the bottom of the panel.
+            if shift {
+                store.clearCompleted()
+                model.select(nil)
+                return true
+            }
+
             // Delete on a blank sub-task row takes the row away rather than the
             // task above it. It used to remove the last sub-task, which is the
             // opposite of what the key means everywhere else in a text field.
-            if let id = model.focusedRow, let parent = draftParent(for: id) {
+            //
+            // Only when that row is the whole selection. ⌘A puts the moving end
+            // of the selection on the *last* row, which is a blank sub-task row
+            // whenever one is open — so ⌘A then ⌫ erased a stray prompt and
+            // left every selected task standing, which is the precise opposite
+            // of what the two keys together say.
+            if selectedItems.isEmpty,
+               let id = model.focusedRow,
+               let parent = draftParent(for: id) {
                 eraseBlankRow(for: parent)
                 return true
             }
@@ -675,25 +904,74 @@ struct PanelView: View {
             return true
 
         case Int(KeyCode.returnKey) where shift:
-            // Shift+Return appends a sub-task under whatever is highlighted.
-            // This is how you get back to adding one: once the blank row is gone
-            // there is no prompt to type into, and the old route — Delete on the
-            // row to remove it, then Tab to bring it back — meant a closed branch
-            // could never be added to again.
-            if let id = model.focusedRow, let parent = store.parentForNewSubtask(of: id) {
-                store.setExpanded(true, id: parent)
-                model.showDraftRow(for: parent)
-                model.requestChildFocus(parent)
+            // Shift+Enter corrects the highlighted task's title, caret at the
+            // end. The one that used to do this — "add a sub-task under whatever
+            // is highlighted" — is plain Enter now, which is what a row of
+            // things inside a task should be reached by.
+            //
+            // A blank sub-task row is not a task, so there is no title to
+            // correct. In practice the caret is in that field whenever the row
+            // is on screen, so this never gets here; consuming the key rather
+            // than falling through keeps it from meaning something else.
+            guard let id = model.focusedRow, draftParent(for: id) == nil,
+                  let item = task(with: id) else { return true }
+            beginEditing(item, caret: .end)
+            return true
+
+        case Int(KeyCode.arrowLeft), Int(KeyCode.arrowRight):
+            // ← and → correct the title, with the caret at whichever end you
+            // are pointing at: the last word, or the first. A typo at the end
+            // of a title is the common one, and putting the caret at the start
+            // of the row would send the letters meant for the end to the front.
+            //
+            // Arrows in a list move the selection everywhere else, so the one
+            // thing this must never do is move it here — hence the return
+            // rather than letting them fall through.
+            guard let id = model.focusedRow else { return true }
+            if draftParent(for: id) != nil {
+                // A blank row has no title; the caret belongs in it, which is
+                // also where arrowing onto a row from the list would have put
+                // it.
+                activateRow(id)
                 return true
             }
+            guard let item = task(with: id) else { return true }
+            beginEditing(item, caret: Int(event.keyCode) == Int(KeyCode.arrowRight) ? .end : .start)
+            return true
+
+        case Int(KeyCode.returnKey):
+            // Enter opens the blank sub-task row under whatever is highlighted,
+            // caret and all. On a sub-task that resolves through to its parent,
+            // so it adds a *sibling* rather than a third level.
+            //
+            // This is the only way to start a sub-task now that Tab on a
+            // childless task does the same thing rather than being the only way
+            // — two roads to one place, not two jobs.
+            if let id = model.focusedRow {
+                let target = draftParent(for: id) ?? store.parentForNewSubtask(of: id)
+                if let target {
+                    // `openWithoutHistory`, not `setExpanded`: what is being
+                    // opened is a prompt to type into, not a change to the list.
+                    // The row below is empty far more often than not, and an
+                    // undo step for an open that was then abandoned would make
+                    // the first ⌘Z after adding a task do nothing at all.
+                    store.openWithoutHistory(id: target)
+                    model.showDraftRow(for: target)
+                    model.requestChildFocus(target)
+                    return true
+                }
+            }
+            // Nothing highlighted: there is no task to put a sub-task under, so
+            // the only sensible place for the keyboard is back at the prompt.
             model.requestInputFocus()
             return true
 
-        case Int(KeyCode.returnKey), Int(KeyCode.escape):
-            // Return and Escape both mean "I'm done with the list": drop the
-            // highlight and hand the caret back. A selection left showing while
-            // the caret is in the prompt claims the next keypress will act on
-            // that task, which is no longer true.
+        case Int(KeyCode.escape):
+            // Escape is "I'm done with the list": drop the highlight and hand
+            // the caret back. Enter used to mean this and now means something
+            // else, and a selection left showing while the caret is in the
+            // prompt claims the next keypress will act on that task, which is no
+            // longer true.
             dismissUnusedBlankRow()
             model.requestInputFocus()
             return true
@@ -723,82 +1001,235 @@ struct PanelView: View {
         store.parentOfDraftRow(id)
     }
 
-    /// Tab opens and closes a task's sub-tasks. That is all it does.
+    /// Tab on a task with nothing under it turns it into a list; on anything
+    /// else it opens or closes the branch it already is.
     ///
-    /// It used to be three things at once — toggle, and *create* a sub-task when
-    /// the task had none — which meant one key was doing two unrelated jobs and
-    /// the only way to tell which had happened was to look at the screen.
-    /// Creating is Shift+Return's job now, so Tab is one verb.
+    /// The first half is new. Tab used to be three things at once — toggle, and
+    /// *create* a sub-task row when the task had none — which meant one key was
+    /// doing two unrelated jobs and the only way to tell which had happened was
+    /// to look at the screen. Flipping a flag on a task with nothing under it
+    /// drew nothing at all, so Tab on a plain task looked broken.
+    ///
+    /// On a childless task there is nothing to open or close, so it does the
+    /// other useful thing instead: open the branch and put the caret in a blank
+    /// row beneath it. Enter does the same thing — two roads to one place,
+    /// which is why neither key is doing the other's job.
     private func tabPressed() {
-        guard let id = model.focusedRow else {
+        guard let focused = model.focusedRow else {
             model.requestInputFocus()
             return
         }
 
-        // On a blank sub-task row there is no branch to open or close, so the
-        // key goes back to the top prompt rather than being swallowed.
-        guard draftParent(for: id) == nil else {
+        // A blank sub-task row is not a task, so it has no branch to open or
+        // close — but the branch it belongs to does, and Tab there means "open
+        // or close this one". Resolving through to the parent is also what
+        // keeps ⌘A then Tab working: select-all puts the selection's moving end
+        // on the *last* row, which is a blank row whenever one is open, so the
+        // old guard below sent the key back to the prompt and threw the whole
+        // selection away instead of toggling anything.
+        let id = draftParent(for: focused) ?? focused
+
+        // A sub-task has no branch of its own, so there is nothing for Tab to
+        // open. The store refuses rather than flipping a flag nothing reads —
+        // which would otherwise cost a ⌘Z press on a keystroke that changed
+        // nothing on screen.
+        guard store.canToggleExpanded(id: id) else {
             model.requestInputFocus()
             return
         }
-        store.toggleExpanded(id: id)
-        // Any blank row goes with it. Toggling means "show me this task's
-        // sub-tasks", and a stray prompt in among them is not part of that.
-        model.hideDraftRow(for: id)
+
+        if !store.hasChildren(id) {
+            // As in the Return path above: this open exists so a row can be typed
+            // into, and an abandoned row is not a change worth an undo step.
+            store.openWithoutHistory(id: id)
+            model.showDraftRow(for: id)
+            model.requestChildFocus(id)
+            return
+        }
+
+        // Closing takes the blank row with it: "show me this task's sub-tasks"
+        // should not leave a stray prompt sitting in among them. Opening leaves
+        // it be — if it was open a moment ago it is open now.
+        if !store.toggleExpanded(id: id) {
+            hideDraftRow(for: id)
+        }
         // Stay on the row, in the list. The caret does not move to a sub-task
-        // row because Tab is not what makes one.
+        // row because Tab is not what makes one here.
         model.select(id)
         model.enterList()
     }
 
     /// Turns the half-typed sub-task into a real one.
     ///
-    /// Return saves it and leaves — the caret goes back to the add-a-task bar
-    /// and the blank row goes away, so a list of one finished sub-task is not
-    /// left with a prompt hanging under it. Shift+Enter saves it and stays,
-    /// with a fresh blank row under the one you just added, for the case where
-    /// you are writing several in a row.
-    private func commitDraft(under parent: UUID, keepGoing: Bool) {
+    /// Return saves it and stays, with a fresh blank row underneath for the next
+    /// one — writing three sub-tasks is Return, Return, Return rather than
+    /// Return, Return, Return, Escape. ⇧Return does exactly the same thing: it
+    /// used to be the only key that kept you in the row, so it is an alias now
+    /// rather than a different verb, and there is no reason to learn two.
+    ///
+    /// An *empty* row is the way out: it is taken away and the caret goes back
+    /// to the add-a-task bar. It used to go through `eraseBlankRow`, which ends
+    /// in `enterList()`, so the keyboard stayed among the tasks and the next
+    /// letter typed was a command: Space ticked something, ⌫ deleted it.
+    private func commitDraft(under parent: UUID) {
         let text = model.draft(for: parent)
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            // Nothing written: Return leaves, Shift+Enter just re-arms the row
-            // it is already on.
-            if keepGoing {
-                model.requestChildFocus(parent)
-            } else {
-                eraseBlankRow(for: parent)
-            }
+            model.clearDraft(for: parent)
+            hideDraftRow(for: parent)
+            model.requestInputFocus()
             return
         }
 
-        _ = store.addSubtask(trimmed, under: parent)
-        model.clearDraft(for: parent)
+        // Refused means the parent is gone or is already at the depth limit, and
+        // there is nothing to save it under. Leave the row and the text exactly
+        // as they are: clearing them and then asking for the caret would put the
+        // keyboard in a field that is never going to exist.
+        guard store.addSubtask(trimmed, under: parent) else { return }
 
-        if keepGoing {
-            model.showDraftRow(for: parent)
-            model.requestChildFocus(parent)
-        } else {
-            model.hideDraftRow(for: parent)
-            model.requestInputFocus()
-        }
+        model.clearDraft(for: parent)
+        model.showDraftRow(for: parent)
+        model.requestChildFocus(parent)
     }
 
-    /// Dismiss the blank sub-task row, leaving the branch and its sub-tasks
-    /// alone, and put the highlight on the last one.
+    /// The row's title, editable in place.
+    ///
+    /// The same `PromptField` the prompt bar uses, rather than a new kind of
+    /// control, so it behaves like every other field in the app: Return saves,
+    /// Escape puts it back, ⌘A selects the text, ⌘Z undoes what you typed.
+    /// A second, subtly different text control would be a second set of bugs.
+    ///
+    /// Drawn at the row's own size. `PromptField` defaults to the prompt's
+    /// 14pt medium, and rows are 13.5pt regular — so switching a task into edit
+    /// mode visibly grew the text and shifted the row's baseline under the
+    /// caret. It has to look like the same row with a cursor in it.
+    private func titleEditor(_ item: TodoItem) -> some View {
+        PromptField(
+            fieldKey: PromptFields.edit(item.id),
+            text: Binding(
+                get: { model.editDraft },
+                set: { model.setEditDraft($0) }
+            ),
+            focusToken: model.editFocusToken,
+            placeholder: "",
+            font: Theme.rowFont,
+            // Asked for after the field has the keyboard, or AppKit's own
+            // select-all-on-focus would wipe it: opening a title to fix its
+            // last word arrived with the whole title selected.
+            initialCaret: model.editCaretOffset,
+            isEnabled: true,
+            onSubmit: { commitEdit() },
+            onMoveDown: { commitEdit() },
+            onMoveUp: { commitEdit() },
+            onDelete: {},
+            onCancel: { cancelEdit() },
+            onClearSelection: {},
+            onEditingBegan: { model.adoptInputTarget(.edit(item.id)) }
+        )
+        .frame(height: 20)
+    }
+
+    private func beginEditing(_ item: TodoItem, caret: PanelModel.EditCaret) {
+        // Commit whatever was open — but *not* through `commitEdit`, which ends
+        // by handing the keyboard to the list. This function is about to give
+        // the keyboard to the editor, and two focus requests in one turn is a
+        // race: the list catcher and the field both ask, on the next runloop
+        // turn, and whichever block lands last wins. When it was the list, the
+        // row showed a caret that could not be typed into and the next keypress
+        // was a command against the list.
+        if let open = model.editing {
+            let text = model.editDraft
+            model.endEditing()
+            store.rename(id: open, to: text)
+        }
+        dismissUnusedBlankRow()
+        model.beginEditing(id: item.id, title: item.title, caret: caret)
+    }
+
+    private func commitEdit() {
+        guard let id = model.editing else { return }
+        let text = model.editDraft
+        model.finishEditing()
+        store.rename(id: id, to: text)
+    }
+
+    private func cancelEdit() {
+        guard model.editing != nil else { return }
+        model.cancelEditing()
+        model.enterList()
+    }
+
+    /// Space, on whatever is selected.
+    ///
+    /// Roots only: ticking a parent leaves what is under it alone.
+    ///
+    /// And then the keyboard moves on. This is the single most repeated action
+    /// in the app — working down a day's list, Space, Space, Space — and it
+    /// used to be impossible to do. Ticking sinks the task to the finished
+    /// group at the bottom, the highlight followed it down, and the list then
+    /// scrolled to follow the highlight: one keystroke at the top of the list
+    /// threw you to the bottom of it. Space again un-ticked the task and threw
+    /// you back. You could tick exactly one task and then you were lost.
+    ///
+    /// Leaving the highlight on the row that took its place is what makes the
+    /// repeat possible. It is the same rule `deleteSelected` already used for
+    /// deletes, and it keeps the guarantee the highlight-follows-the-task rule
+    /// exists for: the row under the green edge is always the row the next
+    /// keystroke will act on, never one you have to go and find again.
+    private func tickSelection() {
+        let ids = selectedItems.map(\.id)
+        guard !ids.isEmpty else { return }
+
+        // Where the highlight should end up, worked out *before* the tick:
+        // the slot the ticked task is vacating.
+        let slot = tasks.firstIndex(where: { ids.contains($0.id) })
+
+        store.toggleRoots(ids: ids)
+
+        // Only for a single task. After a mass tick there is no "next" — every
+        // selected row has just moved to the bottom at once — so the selection
+        // is left exactly where it was.
+        guard ids.count == 1, let slot else { return }
+
+        let remaining = tasks
+        guard !remaining.isEmpty else {
+            model.select(nil)
+            return
+        }
+
+        var index = min(slot, remaining.count - 1)
+        // The row that took the slot should be a *different* task. When it is
+        // the one just ticked, it did not actually move — there was nothing
+        // else open to overtake it — so step back to whatever is above.
+        if remaining[index].id == ids[0], index > 0 {
+            index -= 1
+        }
+        model.select(remaining[index].id)
+    }
+
+    /// Takes an unused blank sub-task row away, leaving the branch and the
+    /// sub-tasks already saved under it alone, and puts the highlight on the
+    /// last row of that branch.
     ///
     /// Closing the branch would have hidden the sub-tasks as well, which is a
     /// different thing: this is about a stray prompt sitting under a list you
-    /// are reading. Tab brings the row back, and so does adding a sub-task.
+    /// are reading. Tab or ↵ brings the row back, and so does adding a
+    /// sub-task.
     private func eraseBlankRow(for parent: UUID) {
-        // Never throw away something half-typed. The keyboard path only gets
-        // here from an empty field, so this is belt and braces for the
-        // list-level Delete, where the row can be selected with a draft in it.
-        guard model.draft(for: parent).isEmpty else { return }
-        model.hideDraftRow(for: parent)
-        // The row just dismissed is still in `rows` until the next render, and
-        // it is the last one in its own branch — so it has to be skipped or the
-        // highlight lands on a row that is no longer there. Matching on the task
+        // Never throw away something half-typed.
+        //
+        // Trimmed, because `commitDraft` decides "nothing written" on the
+        // trimmed text and this guard was testing the raw one. Two spaces in the
+        // row therefore satisfied neither: Return refused to save a blank task,
+        // Delete refused to remove the row, and ⌫ could not rescue it either —
+        // `PromptField` only reports a delete when the field is *completely*
+        // empty, so with characters to erase it went back to the field. The row
+        // was stuck.
+        guard model.draftIsBlank(parent) else { return }
+        model.clearDraft(for: parent)
+        hideDraftRow(for: parent)
+        // Hand the highlight to the branch the row belonged to, so Delete from
+        // the list lands on a task rather than on nothing. Matching on the task
         // itself, rather than on ids, is what makes an actual sub-task match.
         let last = rows.last { row in
             guard case .task(let branch) = row else { return false }
@@ -808,8 +1239,16 @@ struct PanelView: View {
         model.enterList()
     }
 
+    /// The triangle and the right-click menu: open or close the branch.
+    ///
+    /// Closing takes the blank row with it, exactly as Tab does. Without that,
+    /// the row is dropped from the view while the model still says the caret is
+    /// in it — and a caret in a field that is no longer there swallows every key
+    /// that follows, so the panel goes deaf until something else is clicked.
     private func toggleExpanded(_ item: TodoItem) {
-        store.setExpanded(!item.expanded, id: item.id)
+        let opening = !item.expanded
+        store.setExpanded(opening, id: item.id)
+        if !opening { hideDraftRow(for: item.id) }
     }
 
     /// Deletes everything selected, as one undoable step.

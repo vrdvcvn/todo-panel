@@ -96,8 +96,27 @@ if [[ -n "$HOTKEYS" ]]; then
 else
     bad "hotkeys did not register (see log below)"
 fi
-if grep -q "could not register hotkey\|hotkey conflict" "$LOG" 2>/dev/null; then
+# The registration line names a refused combination rather than the one asked
+# for, so this no longer has to be inferred from a second line.
+if grep -q "could not register hotkey\|hotkey conflict\|REFUSED" "$LOG" 2>/dev/null; then
     bad "a hotkey was refused — another app already owns it"
+fi
+
+# Taken here, while the app is still up with the panel open.
+#
+# It used to run at the very end — after the hand-off check, which quits the
+# app — so `--screenshot` photographed whatever happened to be on the screen
+# instead. The panel had already gone; it produced a picture of somebody's
+# editor and called it a picture of the panel, which is worse than no
+# screenshot at all.
+if [[ "$SCREENSHOT" == "1" ]]; then
+    bold "▸ Screenshot"
+    mkdir -p "$ROOT/build"
+    if screencapture -x -o "$SHOT"; then
+        ok "wrote $SHOT (whole screen — the panel is centred on the pointer's display)"
+    else
+        bad "screencapture failed"
+    fi
 fi
 
 bold "▸ Hand-off"
@@ -133,12 +152,6 @@ if [[ -f "$LOG_DIR/todos.json" ]]; then
     ok "todos.json present ($(wc -l < "$LOG_DIR/todos.json" | tr -d ' ') lines)"
 else
     ok "todos.json not created yet (nothing added, this is fine)"
-fi
-
-if [[ "$SCREENSHOT" == "1" ]]; then
-    bold "▸ Screenshot"
-    mkdir -p "$ROOT/build"
-    screencapture -x -o "$SHOT" && ok "wrote $SHOT"
 fi
 
 if [[ "$FAILURES" -gt 0 ]]; then

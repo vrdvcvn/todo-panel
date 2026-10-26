@@ -40,56 +40,87 @@ reason to throw away something you already typed.
 
 | Key | Does |
 |---|---|
-| type, then **Return** | add a task, and drop into a sub-task row under it |
+| type, then **Return** | add a task, and stay in the bar for the next one |
 | **⌘A** | select all the text you have typed |
 | **↓** | move focus into the list |
+| **↑** | from the prompt, jump to the bottom of the list |
 | **↑ ↓** | move the selection |
-| **Tab** | open or close a task's sub-tasks |
-| **⇧Return** | add a sub-task under whatever is highlighted |
+| **Return** | add a sub-task under whatever is highlighted |
+| **⇧Return** | edit the highlighted task's title, caret at the end |
+| **← →** | edit the highlighted task's title, caret at the start / end |
+| **Tab** | on a task with sub-tasks, open or close them; on one with none, turn it into a list |
 | **⇧↑ ⇧↓** | extend the selection to the next task |
 | **⌘A** | select every task on screen, sub-tasks included |
-| **Space** | tick the selected task off (or back on) |
+| **Space** | tick the selected task off (or back on), then move to the next |
 | **Delete** / **⌫** | remove the selected task |
+| **⇧⌫** | throw away everything already finished |
 | **⌘Z** | undo — bring back a deleted task, or untick a ticked one |
 | **⇧⌘Z** or **⌘Y** | redo |
-| **Return** or **Esc** | back to the input field |
+| **Esc** | back to the input field |
 | **Esc** | close the panel |
 | **⌥Space** | close the panel from anywhere |
 
-**Tab** opens and closes a task's sub-tasks. On a task with nothing under it
-yet it opens the branch and drops you into a blank row to type a sub-task. On a
-task that already has some, it opens the branch and highlights the first
-sub-task instead — re-opening something should show you what is in it, not
-throw you past all of it to an empty prompt. The `>` at the right of a task
-points down while it is open.
+**Space** moves on to the next task afterwards. Ticking is the action you repeat
+most — working down a day's list, Space, Space, Space — and a ticked task sinks
+to the finished group at the bottom, so leaving the highlight on it would throw
+you to the bottom of the list once per task and then throw you straight back.
+The highlight goes to whatever row took its place instead, which is also what
+deleting already did. Tick several at once with **⌘A** and the selection stays
+put, because after a mass tick there is no "next".
 
-**Return** at the top prompt saves the task and puts the caret in a sub-task
-row under it, so a task and its sub-tasks can be written in one go without
-moving the keyboard. The task and its being-open are one undo step, so a single
-**⌘Z** removes both. A sub-task row that you look at and then leave without
-typing in is taken away completely — it leaves nothing behind for **⌘Z** to
-undo.
+**⇧⌫** clears the finished tasks in one go. Without it the list fills with
+struck-through rows and the work still to do gets pushed off the bottom of the
+panel; the only other route was picking each finished task out one at a time.
+It appears in the footer as soon as there is anything to clear.
 
-**⇧Return** is how you add a sub-task without going through Tab. With any task
-highlighted it opens that task's branch and puts a blank `> add a sub task` row
-under it, caret and all. That matters because the blank row now only appears
-when you ask for it: it used to sit under every open branch, which is clutter
-to read past.
+**Tab** opens and closes a task's sub-tasks. On a task that already has some it
+opens the branch and closes it again on the next press. On a task with nothing
+under it there is no branch to open or close, so it turns the task into a list:
+branch open, blank `> add a sub task` row under it, caret in the row. That is
+what **Return** does too — two roads to one place, rather than one key doing
+two unrelated jobs and the only way to tell which had happened being to look at
+the screen. The `>` at the right of a task points down while it is open, and
+only appears on a task that has something under it: a task nobody has put a
+sub-task under is just a task, and a column of arrows down a flat list of
+reminders says otherwise.
+
+**Return** at the top prompt adds a task and leaves the caret where it is. It
+used to add the task *and* open it *and* drop you into a sub-task row beneath
+it, so writing three reminders left three opened branches with nothing in them,
+an arrow on every row, and the keyboard somewhere nobody had asked it to be.
+Return is "one more thing", so the next Return is the next thing.
+
+**Return** in the list adds a sub-task: it opens the highlighted task's branch
+and puts a blank row under it, caret and all. On a sub-task it resolves through
+to the parent, so it adds a *sibling*. The blank row only appears when you ask
+for it — it used to sit under every open branch, which is clutter to read past
+— and a row you look at and then leave without typing in is taken away
+completely, leaving nothing behind for **⌘Z** to undo.
+
+**⇧Return**, and **←** and **→**, correct the highlighted task's title where it
+stands. ⇧Return puts the caret at the end, ← or → at whichever end you point at,
+because that is the decision you are making: a word missing from the end, or a
+misspelling at the front. **Return** keeps the new title, **Esc** puts the old
+one back, and the keyboard goes back to the list with the row still selected —
+so fixing a spelling and carrying on with the day is one movement.
 
 Once you are in one:
 
-- **Return** saves the sub-task and hands the caret back to the add-a-task bar.
-  The blank row goes with it.
-- **⇧Return** saves it and leaves a fresh blank row underneath, for writing
-  several in a row.
+- **Return** saves the sub-task and leaves a fresh blank row underneath, for
+  writing several in a row. **⇧Return** does exactly the same thing: it used to
+  be the only key that kept you in the row, so it is an alias now rather than a
+  second verb.
+- **Return** on an *empty* row is the way out: the row is taken away and the
+  caret goes back to the add-a-task bar.
 - **↑ ↓** step through the list from that row, and moving away takes an unused
   blank row with it. One you have typed into stays.
 - **Delete** on it takes the row away; the sub-tasks and the branch stay.
+- **Esc** takes an unused row away too, and leaves one you have typed into.
 - Clicking it puts the caret in it.
 
 The list is a loop you can walk out of at either end: **↑** off the top task and
-**↓** off the bottom task both return to the add-a-task bar, which is what Tab
-used to do.
+**↓** off the bottom task both return to the add-a-task bar, and so does **Esc**
+from anywhere in the list.
 
 Picking is one task at a time. **↓** onto a parent highlights that parent and
 nothing else, and a plain click does the same, even when there are sub-tasks
@@ -103,9 +134,22 @@ place you currently are. The one marker that carries state is a task's `v`,
 which is green while its sub-tasks are open and grey while they are closed.
 
 Nesting is two levels: a task and its sub-tasks. A third was tried and dropped —
-with **⇧Return** appending into whatever is highlighted, one more level is one
+with **Return** appending into whatever is highlighted, one more level is one
 more thing to think about while writing, and one more indent eating the width a
 long title has to wrap into.
+
+Sub-tasks are marked by an indent *and* a guide line down it. Indent alone was
+not enough: by the third sub-task the parent is off the top of what you are
+looking at, and the rows read as loose items that happen to sit a little
+further right. The line is continuous, so membership is read from the line
+rather than measured off the text.
+
+A task only grows a `v` once it has something under it, and loses it again
+when the last of that goes. Adding a task used to open it as well, so the caret
+could drop straight into a sub-task row beneath it, and that state stuck: every
+task ever added kept a permanent green arrow and an `"expanded": true` in the
+file, including the great majority that never had a sub-task, so a plain list of
+reminders looked like a tree.
 
 Sub-tasks are listed oldest first, the opposite of the top level, so a list you
 write down reads back in the order you wrote it.
@@ -122,8 +166,11 @@ worse than pressing it twice. With the field empty, or the keyboard in the
 list, it undoes the last thing you did to the tasks.
 
 Open tasks sit at the top, ticked-off ones sink to the bottom. The footer
-always tells you which keys are live right now — and spells "sub task" as two
-words, which is the same as the placeholders.
+counts top-level tasks only — a sub-task is a step *inside* a task, so
+counting them made the number disagree with the rows on screen — and it spells
+"sub task" as two words, which is the same as the placeholders. Once anything
+is finished it adds "· N done": the same number **⇧⌫** is about to throw away.
+The footer always tells you which keys are live right now.
 
 Clicking `todo` in Spotlight while it is already running re-opens the panel
 rather than doing nothing.
@@ -135,23 +182,40 @@ apps that raise their own window to go fullscreen cannot cover it.
 ## With the mouse
 
 - **Click a task** — selects it and hands the keyboard to the list, so Space
-  and Delete then act on whatever you just picked
+  and Delete then act on whatever you just picked. Clicking never scrolls the
+  list: the pointer has already put the row in front of you
 - **⌘-click** — add or remove that one task and its sub-tasks from the
   selection, leaving the others alone
 - **⇧-click** — select everything between the last pick and this one
 - **Click the `[]` / `[x]`** — ticks that task off, and leaves the selection
   where it was
-- **Right-click a task** — mark done, or delete
+- **Click a highlighted task** — edits its title in place, caret at the end
+- **Right-click a task** — mark done, edit title, or delete
 - **The gear** — opens the settings screen
 
-The selection is the row with a green edge. It follows the task around: tick one
-off and the highlight travels down with it rather than jumping to whatever takes
-its place. That is also why several tasks can be selected at once without the
-highlight wandering onto the wrong one when the list re-sorts underneath it.
+Editing a title in place is the fix for a typo. The only way to correct one
+used to be deleting the task and typing it again, which lost its place in the
+list *and* every sub-task under it over one wrong letter. It is on the row you
+already have highlighted rather than behind a double-click: a second click on a
+selected row is one movement, and a double-click is not something a trackpad
+offers by accident. **Return** keeps the
+new title, **Esc** puts the old one back, and the keyboard goes back to the
+list with the row still selected — so fixing a spelling and carrying on with
+the day is one movement. Clicking elsewhere or closing the panel keeps what
+you typed, the same as a half-written task.
 
-Clicking does not steal the keyboard while you are part-way through typing a
-task — the hand-off only happens when the prompt is empty, so clicking a task
-mid-sentence will not swallow the next keypress.
+The selection is the row with a green edge, and it is always the row the next
+keystroke will act on. Ticking one off hands the highlight to whatever slid into
+the gap — a ticked task sinks to the bottom, so staying on it would throw you
+there once and then, on the next Space, straight back. Deleting does the same.
+Several tasks can be picked at once, and the highlight cannot wander onto the
+wrong one when the list re-sorts underneath it, because the selection is a set
+of tasks rather than a row number.
+
+Clicking does not steal the keyboard while you are part-way through typing —
+in the add-a-task bar or in a sub-task row. The hand-off only happens when the
+field you are in is empty, so clicking a task mid-sentence will not swallow the
+next keypress.
 
 Your list is plain JSON at
 `~/Library/Application Support/todo/todos.json` — readable, hand-editable, and
@@ -230,8 +294,12 @@ swift Tools/make-icon.swift && iconutil -c icns Resources/todo.iconset -o Resour
 confirmed by looking at the screen: undo and redo, mass tick and mass delete,
 every way of selecting more than one task, and the sub-task tree — cascade
 delete, the depth limit, a sub-task whose parent has gone missing, and a list
-file written before sub-tasks existed. `verify.sh` runs it first, so a
-failure there is reported before anything is installed.
+file written before sub-tasks existed. It also covers which field the caret is
+in, where the caret lands when a title opens (counted in characters, not UTF-16
+units), correcting a title and abandoning the correction, an action that changes
+nothing not costing a ⌘Z, and opening a branch to type into it not costing one
+either. `verify.sh` runs it first, so a failure there is reported before
+anything is installed.
 
 It lives inside the executable rather than in a test target on purpose. This
 machine has the Command Line Tools and no full Xcode, so there is no XCTest to
