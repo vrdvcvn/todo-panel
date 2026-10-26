@@ -491,6 +491,66 @@ final class PanelModel: ObservableObject {
         if let focus, !live.contains(focus) { self.focus = nil }
     }
 
+    // MARK: - Where the highlight goes next
+
+    /// What changed in the list, for `selectionAfterChange(slot:change:changed:after:)`.
+    enum ListChange {
+        /// A task was ticked off, so it has re-sorted into the finished group.
+        case ticked
+        /// Rows were removed, by the delete key or the context menu.
+        case deleted
+    }
+
+    /// The row the highlight should move to after the list changes under it.
+    ///
+    /// The convention every keyboard-driven list follows: the highlight keeps
+    /// its place *on screen*, not its task. Whatever slid into the vacated slot
+    /// takes it; if the change emptied the list there is nothing to hold; if it
+    /// removed the tail, the last surviving row gets it rather than the
+    /// highlight falling off the end.
+    ///
+    /// `slot` is the index, in the list *before* the change, of the row the key
+    /// acted on. `after` is the ordered rows that survive — and the caller has
+    /// to pass what is actually on screen now, not "the old list minus the ids
+    /// I selected": deleting a parent takes its sub-tasks with it, and those
+    /// were never in the selection that asked for the delete. A highlight put
+    /// on one of them would name a row that no longer exists, so the next
+    /// keystroke would act on nothing.
+    ///
+    /// A tick has one extra rule, because it can leave the task exactly where it
+    /// was: finishing the last open task moves nothing, so the slot still holds
+    /// the task just ticked. Stepping back to the row above keeps you among the
+    /// work that is left — the next thing you want after finishing one task is
+    /// not the one you finished. At the top of the list there is nothing above
+    /// to step back to, so it stays.
+    ///
+    /// Returned rather than applied, so the rule is a pure function of two
+    /// ordered lists and an identity — no view, no window, no AppKit — and can
+    /// be asserted directly.
+    func selectionAfterChange(
+        slot: Int,
+        change: ListChange,
+        changed: [UUID],
+        after: [UUID]
+    ) -> UUID? {
+        guard !after.isEmpty else { return nil }
+        var index = min(max(0, slot), after.count - 1)
+
+        switch change {
+        case .deleted:
+            break
+        case .ticked:
+            // `changed.first`, not `contains`: a tick is one task. A mass tick
+            // does not come through here at all — every selected row moves to
+            // the bottom at once, so there is no "next" to hand the highlight
+            // to, and the selection is deliberately left alone.
+            if let ticked = changed.first, after[index] == ticked, index > 0 {
+                index -= 1
+            }
+        }
+        return after[index]
+    }
+
     /// Forgets half-typed sub-task text belonging to tasks that are gone.
     ///
     /// `childDrafts` and `openDraftRows` are keyed by parent, so an undo or a

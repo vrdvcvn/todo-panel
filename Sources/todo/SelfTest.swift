@@ -693,6 +693,48 @@ enum SelfTest {
         model.resetToInput()
         r.check("select: reopening clears the highlight", model.selection.isEmpty)
         r.check("select: reopening keeps the draft", model.draft == "half a task")
+
+        // Where the highlight lands after the list changes under it. Every
+        // keyboard-driven list does the same thing: the highlight keeps its
+        // place *on screen*, so whatever slid into the vacated slot takes it.
+        // This was three separate copies in the view, each with a slightly
+        // different edge rule, and none of them reachable from a test.
+        do {
+            let m = PanelModel()
+
+            r.equal("select: a delete hands the highlight to the row that took the gap",
+                    m.selectionAfterChange(slot: 1, change: .deleted, changed: [ids[1]],
+                                           after: [ids[0], ids[2], ids[3]]), ids[2])
+            r.equal("select: deleting the last row keeps the highlight in the list",
+                    m.selectionAfterChange(slot: 3, change: .deleted, changed: [ids[3]],
+                                           after: [ids[0], ids[1], ids[2]]), ids[2])
+            r.check("select: deleting everything leaves nothing to highlight",
+                    m.selectionAfterChange(slot: 0, change: .deleted, changed: ids,
+                                           after: []) == nil)
+
+            // A tick re-sorts the task into the finished group, so the row that
+            // takes the slot is the next open one.
+            r.equal("select: a tick hands the highlight to whatever took the slot",
+                    m.selectionAfterChange(slot: 1, change: .ticked, changed: [ids[1]],
+                                           after: [ids[0], ids[2], ids[3]]), ids[2])
+
+            // Finishing the last open task moves nothing, so the slot still
+            // holds the task just ticked — and the next thing you want after
+            // finishing one is not the one you finished.
+            r.equal("select: a tick that moved nothing steps back to the row above",
+                    m.selectionAfterChange(slot: 1, change: .ticked, changed: [ids[1]],
+                                           after: [ids[0], ids[1]]), ids[0])
+            r.equal("select: and at the top there is nothing above to step back to",
+                    m.selectionAfterChange(slot: 0, change: .ticked, changed: [ids[0]],
+                                           after: [ids[0]]), ids[0])
+
+            // The caller passes what is on screen *now*. Deleting a parent
+            // takes its sub-tasks with it, so they are not in `after` even
+            // though they were never in the selection that asked for it.
+            r.equal("select: a row cascaded away can never take the highlight",
+                    m.selectionAfterChange(slot: 1, change: .deleted, changed: [ids[1]],
+                                           after: [ids[0], ids[3]]), ids[3])
+        }
     }
 
     // MARK: - Focus

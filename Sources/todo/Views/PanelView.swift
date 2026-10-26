@@ -1182,29 +1182,24 @@ struct PanelView: View {
 
         // Where the highlight should end up, worked out *before* the tick:
         // the slot the ticked task is vacating.
-        let slot = tasks.firstIndex(where: { ids.contains($0.id) })
+        guard let slot = tasks.firstIndex(where: { ids.contains($0.id) }) else { return }
 
         store.toggleRoots(ids: ids)
 
         // Only for a single task. After a mass tick there is no "next" — every
         // selected row has just moved to the bottom at once — so the selection
         // is left exactly where it was.
-        guard ids.count == 1, let slot else { return }
+        guard ids.count == 1 else { return }
 
-        let remaining = tasks
-        guard !remaining.isEmpty else {
-            model.select(nil)
-            return
-        }
-
-        var index = min(slot, remaining.count - 1)
-        // The row that took the slot should be a *different* task. When it is
-        // the one just ticked, it did not actually move — there was nothing
-        // else open to overtake it — so step back to whatever is above.
-        if remaining[index].id == ids[0], index > 0 {
-            index -= 1
-        }
-        model.select(remaining[index].id)
+        // `tasks` again rather than a copy taken before the tick: the rule is
+        // about the list as it is now, and it also has to step back when the
+        // tick moved nothing. See `PanelModel.selectionAfterChange`.
+        model.select(model.selectionAfterChange(
+            slot: slot,
+            change: .ticked,
+            changed: ids,
+            after: tasks.map(\.id)
+        ))
     }
 
     /// Takes an unused blank sub-task row away, leaving the branch and the
@@ -1253,36 +1248,35 @@ struct PanelView: View {
 
     /// Deletes everything selected, as one undoable step.
     private func deleteSelected() {
-        guard let index = model.focusedRow.flatMap({ id in
+        guard let slot = model.focusedRow.flatMap({ id in
             tasks.firstIndex(where: { $0.id == id })
         }) ?? selectedItems.first.flatMap({ item in
             tasks.firstIndex(where: { $0.id == item.id })
         }) else { return }
 
         let ids = selectedItems.map(\.id)
-        // Keep the highlight in roughly the same visual slot afterwards:
-        // whatever slid into the gap, or the row before it if the list emptied.
-        let survivors = tasks.filter { !ids.contains($0.id) }
         store.delete(ids: ids)
 
-        if survivors.isEmpty {
-            model.select(nil)
-        } else {
-            model.select(survivors[min(index, survivors.count - 1)].id)
-        }
+        // `tasks` after the delete, not "the old list minus these ids": deleting
+        // a parent takes its sub-tasks with it, and those were never selected.
+        model.select(model.selectionAfterChange(
+            slot: slot,
+            change: .deleted,
+            changed: ids,
+            after: tasks.map(\.id)
+        ))
     }
 
     /// Single-task delete, from the row's right-click menu.
     private func delete(id: UUID) {
-        guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
-        let remaining = tasks.filter { $0.id != id }
+        guard let slot = tasks.firstIndex(where: { $0.id == id }) else { return }
         store.delete(id: id)
-
-        if remaining.isEmpty {
-            model.select(nil)
-        } else {
-            model.select(remaining[min(index, remaining.count - 1)].id)
-        }
+        model.select(model.selectionAfterChange(
+            slot: slot,
+            change: .deleted,
+            changed: [id],
+            after: tasks.map(\.id)
+        ))
     }
 }
 
